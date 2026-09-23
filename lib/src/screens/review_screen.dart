@@ -700,11 +700,13 @@ class _ReviewScreenState extends State<ReviewScreen> {
             const barWidth = 16.0;
             const gap = 6.0;
             final maxByWidth = constraints.maxWidth - barWidth - gap - 8;
-            final maxByHeight = constraints.maxHeight * (_chatOpen ? 0.42 : 0.56);
+            final keyboard = MediaQuery.of(context).viewInsets.bottom > 0;
+            final maxByHeight = constraints.maxHeight * (keyboard ? 0.38 : (_chatOpen ? 0.42 : 0.56));
             final boardSize = maxByWidth < maxByHeight ? maxByWidth : maxByHeight;
             return Column(
               children: [
-                _Toolbar(
+                if (!keyboard)
+                  _Toolbar(
                   guessOn: _guessOn,
                   onGuessChanged: (v) => setState(() {
                     _guessOn = v;
@@ -739,13 +741,14 @@ class _ReviewScreenState extends State<ReviewScreen> {
                   ],
                 ),
                 _PlayerLine(player: bottom),
-                MoveStrip(
-                  game: game,
-                  currentPly: _exploring ? (_branchPly ?? _ply) : _ply,
-                  onSelectPly: _go,
-                  colors: _awaitingGuess ? const {} : colors,
-                  keyMoments: keyMoments,
-                ),
+                if (!keyboard)
+                  MoveStrip(
+                    game: game,
+                    currentPly: _exploring ? (_branchPly ?? _ply) : _ply,
+                    onSelectPly: _go,
+                    colors: _awaitingGuess ? const {} : colors,
+                    keyMoments: keyMoments,
+                  ),
                 Expanded(
                   child: _chatOpen
                       ? _ChatHistory(
@@ -818,7 +821,8 @@ class _ReviewScreenState extends State<ReviewScreen> {
                           ],
                         ),
                 ),
-                _NavBar(
+                if (!keyboard)
+                  _NavBar(
                   canBack: !_grading && (_exploring || _ply > 0),
                   canForward: !_grading && !_awaitingGuess && !_exploring && _ply < game.plyCount,
                   onStart: () => _go(0),

@@ -59,11 +59,12 @@ jobs:
           flutter analyze --no-fatal-infos --no-fatal-warnings > analyze.txt 2>&1
           status=$?
           cat analyze.txt
-          grep -E '^\s*error •' analyze.txt | head -40 | while IFS= read -r line; do
+          grep -E '^\s*(error|warning) •' analyze.txt | head -40 | while IFS= read -r line; do
+            level=$(echo "$line" | awk -F' • ' '{gsub(/ /,"",$1); print $1}')
             msg=$(echo "$line" | awk -F' • ' '{print $2}')
             loc=$(echo "$line" | awk -F' • ' '{print $3}')
             file=${loc%%:*}; rest=${loc#*:}; ln=${rest%%:*}
-            echo "::error file=$file,line=$ln::$msg"
+            echo "::$level file=$file,line=$ln::$msg"
           done
           exit $status
 

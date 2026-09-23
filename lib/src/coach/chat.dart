@@ -175,6 +175,7 @@ class ChatService {
     final sources = <String>{};
     final seenLines = <List<String>>[];
     String answer = '';
+    var endedOnToolUse = false;
 
     try {
       for (var round = 0; round <= _maxToolRounds; round++) {
@@ -191,6 +192,7 @@ class ChatService {
         final uses = res.toolUses;
         if (res.stopReason != 'tool_use' || uses.isEmpty || round == _maxToolRounds) {
           answer = res.text;
+          endedOnToolUse = uses.isNotEmpty;
           break;
         }
         final results = <Map<String, dynamic>>[];
@@ -207,7 +209,7 @@ class ChatService {
       }
 
       // One correction round if the answer names a move that isn't legal anywhere relevant.
-      final bad = _illegalMoves(answer, board, game, seenLines);
+      final bad = endedOnToolUse ? const <String>[] : _illegalMoves(answer, board, game, seenLines);
       if (bad.isNotEmpty) {
         onStatus?.call('Double-checking the moves…');
         pending.add({
