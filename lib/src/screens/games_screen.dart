@@ -193,7 +193,7 @@ class _GamesScreenState extends State<GamesScreen> {
               tooltip: 'Settings',
               icon: const Icon(Icons.settings_outlined),
               onPressed: () => Navigator.of(context).push(MaterialPageRoute(
-                builder: (_) => SettingsScreen(settings: widget.settings, lichess: widget.lichess),
+                builder: (_) => const SettingsScreen(),
               )),
             ),
         ],
