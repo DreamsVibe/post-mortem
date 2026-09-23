@@ -1,0 +1,22 @@
+name: post_mortem
+description: Post Mortem — review Lichess games with a Stockfish-backed Claude coach.
+publish_to: "none"
+
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.7.0 <4.0.0"
+  flutter: ">=3.29.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  chessground: ^10.2.0
+  dartchess: ^0.13.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

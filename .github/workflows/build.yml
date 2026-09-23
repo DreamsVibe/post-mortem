@@ -1,0 +1,67 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # Fills in any Flutter platform files that are not in the repo yet (never
+      # overwrites existing ones) and commits them back, so the repo holds the
+      # complete Android project after the first run.
+      - name: Generate missing platform files
+        run: |
+          flutter create --org com.dreamsvibe --project-name post_mortem --platforms android .
+          rm -f test/widget_test.dart
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Add generated Android platform files [skip ci]"
+            git push
+          fi
+
+      # Same signing key on every build, so each new APK installs over the last one.
+      - name: Install signing key
+        run: |
+          mkdir -p ~/.android
+          cp android/debug.keystore ~/.android/debug.keystore
+
+      - run: flutter pub get
+
+      - run: flutter build apk --release --target-platform android-arm64
+
+      - name: Publish as the "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk post-mortem.apk
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest post-mortem.apk \
+            --target "$GITHUB_SHA" \
+            --title "Post Mortem — latest build" \
+            --notes "Built from ${GITHUB_SHA::7} on $(date -u +'%Y-%m-%d %H:%M UTC')." \
+            --prerelease
