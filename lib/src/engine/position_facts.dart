@@ -342,13 +342,19 @@ class PositionFacts {
         final targets = _targetsOf(b1, landed)
             .where((t) => b1.roleAt(t) != Role.pawn || _attackers(b1, t, enemy).isEmpty)
             .toList();
-        if (targets.length >= 2 &&
-            targets.where((t) => (_values[b1.roleAt(t)] ?? 10) >= 3 || b1.roleAt(t) == Role.king).length >= 2) {
-          facts.add('forks ${targets.take(3).map((t) => _short(b1, t)).join(' and ')}');
+        final canBeTaken = loosePieces(b1, mover).contains(landed);
+        final bigTargets = targets
+            .where((t) => (_values[b1.roleAt(t)] ?? 10) >= 3 || b1.roleAt(t) == Role.king)
+            .toList();
+        if (bigTargets.length >= 2 && !canBeTaken) {
+          facts.add('forks ${bigTargets.take(3).map((t) => _short(b1, t)).join(' and ')}');
         } else if (targets.isNotEmpty) {
-          facts.add('now attacks ${targets.take(3).map((t) => _short(b1, t)).join(', ')}');
+          facts.add(
+            'now attacks ${targets.take(3).map((t) => _short(b1, t)).join(', ')}'
+            '${canBeTaken ? ' (but it can be taken)' : ''}',
+          );
         }
-        if (_attackers(b1, landed, enemy).isNotEmpty && _attackers(b1, landed, mover).isEmpty) {
+        if (canBeTaken && _attackers(b1, landed, mover).isEmpty) {
           facts.add('the moved piece stands undefended where it can be taken');
         }
       }
