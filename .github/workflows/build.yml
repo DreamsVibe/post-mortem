@@ -16,9 +16,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
@@ -51,7 +51,34 @@ jobs:
 
       - run: flutter pub get
 
-      - run: flutter build apk --release --target-platform android-arm64
+      # Analyzer errors become annotations on the run, so they can be read
+      # without downloading the full log.
+      - name: Analyze
+        run: |
+          set +e
+          flutter analyze --no-fatal-infos --no-fatal-warnings > analyze.txt 2>&1
+          status=$?
+          cat analyze.txt
+          grep -E '^\s*error •' analyze.txt | head -40 | while IFS= read -r line; do
+            msg=$(echo "$line" | awk -F' • ' '{print $2}')
+            loc=$(echo "$line" | awk -F' • ' '{print $3}')
+            file=${loc%%:*}; rest=${loc#*:}; ln=${rest%%:*}
+            echo "::error file=$file,line=$ln::$msg"
+          done
+          exit $status
+
+      - name: Build APK
+        run: |
+          set +e
+          flutter build apk --release --target-platform android-arm64 > build.txt 2>&1
+          status=$?
+          cat build.txt
+          if [ $status -ne 0 ]; then
+            grep -E 'Error:|error:|FAILURE|What went wrong|Exception' build.txt | head -30 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          fi
+          exit $status
 
       - name: Publish as the "latest" release
         env:

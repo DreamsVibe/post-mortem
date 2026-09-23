@@ -13,6 +13,9 @@ dependencies:
     sdk: flutter
   chessground: ^10.2.0
   dartchess: ^0.13.1
+  flutter_secure_storage: ^9.2.4
+  http: ^1.2.2
+  shared_preferences: ^2.3.3
 
 dev_dependencies:
   flutter_test:
@@ -20,3 +23,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/icon.png

@@ -1,91 +1,38 @@
-import 'package:chessground/chessground.dart';
-import 'package:dartchess/dartchess.dart';
 import 'package:flutter/material.dart';
 
-const kInk = Color(0xFF1E1B18);
-const kIvory = Color(0xFFF3EDE2);
-const kAmber = Color(0xFFE0A43A);
+import 'src/lichess_client.dart';
+import 'src/screens/games_screen.dart';
+import 'src/screens/setup_screen.dart';
+import 'src/settings.dart';
+import 'src/theme.dart';
 
-void main() {
-  runApp(const PostMortemApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final settings = await AppSettings.load();
+  runApp(PostMortemApp(settings: settings, lichess: LichessClient()));
 }
 
 class PostMortemApp extends StatelessWidget {
-  const PostMortemApp({super.key});
+  const PostMortemApp({super.key, required this.settings, required this.lichess});
+
+  final AppSettings settings;
+  final LichessClient lichess;
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Post Mortem',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: kInk,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: kAmber,
-          brightness: Brightness.dark,
-          surface: kInk,
-        ),
-        useMaterial3: true,
-      ),
-      home: const HomeScreen(),
-    );
-  }
-}
-
-class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final textTheme = Theme.of(context).textTheme;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Post Mortem'),
-        backgroundColor: kInk,
-      ),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  return StaticChessboard(
-                    size: constraints.maxWidth,
-                    orientation: Side.white,
-                    fen: kInitialBoardFEN,
-                    shapes: {
-                      Arrow(
-                        color: kAmber.withValues(alpha: 0.85),
-                        orig: Square.e2,
-                        dest: Square.e4,
-                      ),
-                    },
-                    settings: StaticChessboardSettings(
-                      borderRadius: BorderRadius.circular(8),
-                      colorScheme: ChessboardColorScheme.brown,
-                    ),
-                  );
-                },
-              ),
-              const SizedBox(height: 24),
-              Text(
-                'The coach is on its way.',
-                style: textTheme.titleLarge?.copyWith(color: kIvory),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'This first build checks that the app, the board and the '
-                'cloud build all work. Game import and the Professor come next.',
-                style: textTheme.bodyMedium?.copyWith(
-                  color: kIvory.withValues(alpha: 0.75),
-                ),
-              ),
-            ],
-          ),
-        ),
+      theme: buildTheme(),
+      home: ListenableBuilder(
+        listenable: settings,
+        builder: (context, _) => settings.hasUsername
+            ? GamesScreen(
+                key: ValueKey(settings.username),
+                settings: settings,
+                lichess: lichess,
+              )
+            : SetupScreen(settings: settings, lichess: lichess),
       ),
     );
   }
