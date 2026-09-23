@@ -97,7 +97,11 @@ class PositionFacts {
         final pinned = blockers.squares.first;
         if (b.sideAt(pinned) != side) continue;
         final pinnedRole = b.roleAt(pinned)!;
-        if (b.roleAt(target) == Role.queen && _values[pinnedRole]! >= 9) continue;
+        // Against a queen, only a cheaper attacker makes a real pin (a queen "pinning" to a
+        // queen just offers a trade), and the pinned piece must be worth less than the queen.
+        if (b.roleAt(target) == Role.queen && (role == Role.queen || _values[pinnedRole]! >= 9)) {
+          continue;
+        }
         out.add(
           '${_piece(b, pinned)} is pinned to its ${_roleName(b.roleAt(target)!)} by the '
           '${_roleName(role)} on ${slider.name}',
@@ -243,8 +247,8 @@ class PositionFacts {
     }
     // Mobility as a rough measure of activity.
     var reach = 0;
-    for (final sq in (b.bySide(side) - b.pawns - b.kings).squares) {
-      reach += (attacks(b.pieceAt(sq)!, sq, b.occupied) - b.bySide(side)).size;
+    for (final sq in b.bySide(side).diff(b.pawns).diff(b.kings).squares) {
+      reach += attacks(b.pieceAt(sq)!, sq, b.occupied).diff(b.bySide(side)).size;
     }
     out.add('pieces reach $reach squares');
     return out;
