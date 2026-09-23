@@ -1,25 +1,22 @@
 import 'package:flutter/material.dart';
 
-import 'src/lichess_client.dart';
 import 'src/screens/games_screen.dart';
 import 'src/screens/setup_screen.dart';
-import 'src/settings.dart';
+import 'src/services.dart';
 import 'src/theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final settings = await AppSettings.load();
-  runApp(PostMortemApp(settings: settings, lichess: LichessClient()));
+  services = await AppServices.create();
+  runApp(const PostMortemApp());
 }
 
 class PostMortemApp extends StatelessWidget {
-  const PostMortemApp({super.key, required this.settings, required this.lichess});
-
-  final AppSettings settings;
-  final LichessClient lichess;
+  const PostMortemApp({super.key});
 
   @override
   Widget build(BuildContext context) {
+    final settings = services.settings;
     return MaterialApp(
       title: 'Post Mortem',
       debugShowCheckedModeBanner: false,
@@ -30,9 +27,9 @@ class PostMortemApp extends StatelessWidget {
             ? GamesScreen(
                 key: ValueKey(settings.username),
                 settings: settings,
-                lichess: lichess,
+                lichess: services.lichess,
               )
-            : SetupScreen(settings: settings, lichess: lichess),
+            : SetupScreen(settings: settings, lichess: services.lichess),
       ),
     );
   }

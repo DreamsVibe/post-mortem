@@ -2,16 +2,42 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// App-wide settings: the linked Lichess username and the Anthropic API key.
+import 'engine/game_analysis.dart';
+
+/// Claude models the coach can use.
+enum CoachModel {
+  sonnet('claude-sonnet-5', 'Sonnet 5', 'Best commentary', 2.0, 10.0),
+  haiku('claude-haiku-4-5-20251001', 'Haiku 4.5', 'Cheaper and faster', 1.0, 5.0);
+
+  const CoachModel(this.id, this.label, this.blurb, this.inputPerMTok, this.outputPerMTok);
+
+  final String id;
+  final String label;
+  final String blurb;
+
+  /// Dollars per million tokens. Cache writes cost 1.25× input, cache reads 0.1× input.
+  final double inputPerMTok;
+  final double outputPerMTok;
+
+  static CoachModel byName(String? name) =>
+      CoachModel.values.firstWhere((m) => m.name == name, orElse: () => CoachModel.sonnet);
+}
+
+/// App-wide settings.
 ///
-/// The username is a plain preference. The API key lives in secure storage
-/// (Android Keystore-backed) and never leaves the phone except as the auth
-/// header of Claude API calls.
+/// Plain preferences hold the username, model, engine depth and spending cap. Secrets (the
+/// Anthropic API key and the optional Lichess study token) live in secure storage (Android
+/// Keystore-backed) and only ever leave the phone as auth headers.
 class AppSettings extends ChangeNotifier {
   AppSettings._(this._prefs);
 
   static const _kUsername = 'lichess_username';
   static const _kApiKey = 'anthropic_api_key';
+  static const _kLichessToken = 'lichess_study_token';
+  static const _kModel = 'coach_model';
+  static const _kDepth = 'engine_depth';
+  static const _kCap = 'monthly_cap_dollars';
+  static const _kStudy = 'last_study';
 
   final SharedPreferences _prefs;
   final FlutterSecureStorage _secure = const FlutterSecureStorage(
@@ -20,6 +46,7 @@ class AppSettings extends ChangeNotifier {
 
   String? _username;
   String? _apiKey;
+  String? _lichessToken;
 
   static Future<AppSettings> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -27,16 +54,31 @@ class AppSettings extends ChangeNotifier {
     settings._username = prefs.getString(_kUsername);
     try {
       settings._apiKey = await settings._secure.read(key: _kApiKey);
+      settings._lichessToken = await settings._secure.read(key: _kLichessToken);
     } catch (_) {
       settings._apiKey = null;
+      settings._lichessToken = null;
     }
     return settings;
   }
 
+  SharedPreferences get prefs => _prefs;
+
   String? get username => _username;
   String? get apiKey => _apiKey;
+  String? get lichessToken => _lichessToken;
   bool get hasUsername => (_username ?? '').isNotEmpty;
   bool get hasApiKey => (_apiKey ?? '').isNotEmpty;
+  bool get hasLichessToken => (_lichessToken ?? '').isNotEmpty;
+
+  CoachModel get model => CoachModel.byName(_prefs.getString(_kModel));
+  EngineDepth get depth => EngineDepth.byName(_prefs.getString(_kDepth));
+
+  /// Monthly spending cap in dollars, or null for no cap.
+  double? get monthlyCap => _prefs.getDouble(_kCap);
+
+  /// Last study exported to, as "id|name".
+  String? get lastStudy => _prefs.getString(_kStudy);
 
   Future<void> setUsername(String? value) async {
     final v = value?.trim();
@@ -51,14 +93,46 @@ class AppSettings extends ChangeNotifier {
   }
 
   Future<void> setApiKey(String? value) async {
+    _apiKey = await _setSecret(_kApiKey, value);
+    notifyListeners();
+  }
+
+  Future<void> setLichessToken(String? value) async {
+    _lichessToken = await _setSecret(_kLichessToken, value);
+    notifyListeners();
+  }
+
+  Future<String?> _setSecret(String key, String? value) async {
     final v = value?.trim();
     if (v == null || v.isEmpty) {
-      await _secure.delete(key: _kApiKey);
-      _apiKey = null;
-    } else {
-      await _secure.write(key: _kApiKey, value: v);
-      _apiKey = v;
+      await _secure.delete(key: key);
+      return null;
     }
+    await _secure.write(key: key, value: v);
+    return v;
+  }
+
+  Future<void> setModel(CoachModel m) async {
+    await _prefs.setString(_kModel, m.name);
+    notifyListeners();
+  }
+
+  Future<void> setDepth(EngineDepth d) async {
+    await _prefs.setString(_kDepth, d.name);
+    notifyListeners();
+  }
+
+  Future<void> setMonthlyCap(double? dollars) async {
+    if (dollars == null || dollars <= 0) {
+      await _prefs.remove(_kCap);
+    } else {
+      await _prefs.setDouble(_kCap, dollars);
+    }
+    notifyListeners();
+  }
+
+  Future<void> setLastStudy(String id, String name) async {
+    await _prefs.setString(_kStudy, '$id|$name');
     notifyListeners();
   }
 }

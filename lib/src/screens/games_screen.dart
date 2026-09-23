@@ -6,7 +6,7 @@ import '../game_record.dart';
 import '../lichess_client.dart';
 import '../settings.dart';
 import '../theme.dart';
-import 'game_screen.dart';
+import 'review_screen.dart';
 import 'settings_screen.dart';
 
 /// Recent games of a player: yours by default, or anyone you look up.
@@ -127,7 +127,7 @@ class _GamesScreenState extends State<GamesScreen> {
 
   void _openGame(GameRecord game) {
     Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => GameScreen(game: game, settings: widget.settings),
+      builder: (_) => ReviewScreen(game: game),
     ));
   }
 

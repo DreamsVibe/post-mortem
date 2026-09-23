@@ -12,10 +12,36 @@ dependencies:
   flutter:
     sdk: flutter
   chessground: ^10.2.0
+  crypto: ^3.0.3
   dartchess: ^0.13.1
   flutter_secure_storage: ^9.2.4
   http: ^1.2.2
+  multistockfish:
+    git:
+      url: https://github.com/lichess-org/dart-multistockfish.git
+      ref: 50bcf579f19ff22c07e98fdb0f787617957d7e21
+      path: pkgs/multistockfish
+  path_provider: ^2.1.4
   shared_preferences: ^2.3.3
+
+# The engine's native packages come from the same commit of the multistockfish repo as the
+# plugin itself, so all four always match.
+dependency_overrides:
+  multistockfish_chess:
+    git:
+      url: https://github.com/lichess-org/dart-multistockfish.git
+      ref: 50bcf579f19ff22c07e98fdb0f787617957d7e21
+      path: pkgs/multistockfish_chess
+  multistockfish_sf16:
+    git:
+      url: https://github.com/lichess-org/dart-multistockfish.git
+      ref: 50bcf579f19ff22c07e98fdb0f787617957d7e21
+      path: pkgs/multistockfish_sf16
+  multistockfish_variant:
+    git:
+      url: https://github.com/lichess-org/dart-multistockfish.git
+      ref: 50bcf579f19ff22c07e98fdb0f787617957d7e21
+      path: pkgs/multistockfish_variant
 
 dev_dependencies:
   flutter_test:
