@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:dartchess/dartchess.dart';
 
 import '../engine/game_analysis.dart';
+import '../engine/position_facts.dart';
 import '../engine/stockfish_engine.dart';
 import '../game_record.dart';
 import '../lichess_client.dart';
@@ -161,7 +162,16 @@ class ChatService {
     if (board.variation.isNotEmpty) {
       where.writeln(' The user is exploring a side line from the game: ${board.variation.join(' ')}.');
     }
-    where.write(']');
+    final castled = <Side>{
+      for (var p = 1; p <= board.ply && p <= game.plyCount; p++)
+        if (game.sans[p - 1].startsWith('O-O')) game.positions[p - 1].turn,
+    };
+    where
+      ..writeln(' Board:')
+      ..writeln(PositionFacts.diagram(board.position))
+      ..writeln(' Board facts:')
+      ..writeln(PositionFacts.position(board.position, castled: castled, opening: board.ply <= 24))
+      ..write(']');
 
     final pending = <Map<String, dynamic>>[
       ...session._raw,
@@ -368,8 +378,15 @@ class ChatService {
     for (var i = 0; i < lines.length; i++) {
       final san = uciLineToSan(pos, lines[i].pv.take(8).toList());
       sanLines.add(san);
-      out.writeln('${i + 1}) ${lines[i].eval.label} (depth ${lines[i].depth}): ${san.join(' ')}');
+      final meaning = PositionFacts.line(pos, lines[i].pv);
+      out.writeln(
+        '${i + 1}) [rank ${lines[i].eval.label}, depth ${lines[i].depth}] ${san.join(' ')}'
+        '${meaning.isNotEmpty ? '\n   what it does: $meaning' : ''}',
+      );
     }
+    out
+      ..writeln('Board facts for this position:')
+      ..writeln(PositionFacts.position(pos, castled: const {}, opening: false));
     return (out.toString(), 'Stockfish', sanLines);
   }
 
@@ -427,10 +444,14 @@ TASK: answer the user's questions in the chatbox of the review screen. Each ques
 the position currently on their board (FEN, move label, and any side line they are exploring).
 
 - Keep answers short: 2-5 sentences, plain text, no markdown headings or tables.
-- For anything about a concrete position (evaluations, best moves, "what if I played X"), call
-  analyze_position on the on-device Stockfish and base the answer on its output. You may chain
-  several calls to compare lines. Quote the key numbers, e.g. "Nf3 keeps +0.4 at depth 18, while
-  Bg5 drops to -1.2 because of ...Qb6."
+- Each question comes with a diagram and verified board facts for the position on the board.
+  Explain with those: pieces, squares, threats, weaknesses, plans.
+- For anything concrete ("what if I played X", "what's the best move", "why is this bad"), call
+  analyze_position on the on-device Stockfish. Its lines come with what they concretely achieve;
+  use that to explain what happens on the board. You may chain several calls to compare lines.
+- The engine scores are for your judgement only. Don't answer with numbers or "the engine says";
+  answer like a coach: "After Bg5, ...Qb6 pins your knight to the rook and wins it, while Nd2
+  keeps everything defended."
 - Use the Lichess tools only when a question needs data the engine can't give: how popular a line
   is or what masters play (opening explorer), perfect endgame play (tablebase), or facts about a
   player (profile, rating history, recent games). Say where the data came from.

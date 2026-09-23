@@ -6,8 +6,9 @@ import 'engine/game_analysis.dart';
 
 /// Claude models the coach can use.
 enum CoachModel {
-  sonnet('claude-sonnet-5', 'Sonnet 5', 'Best commentary', 2.0, 10.0),
-  haiku('claude-haiku-4-5-20251001', 'Haiku 4.5', 'Cheaper and faster', 1.0, 5.0);
+  sonnet('claude-sonnet-5', 'Sonnet 5', 'Strong commentary at a good price', 2.0, 10.0),
+  opus('claude-opus-5-5', 'Opus 5.5', 'Deepest chess understanding, about twice the cost', 4.0, 20.0),
+  haiku('claude-haiku-4-5-20251001', 'Haiku 4.5', 'Cheapest and fastest, lighter analysis', 1.0, 5.0);
 
   const CoachModel(this.id, this.label, this.blurb, this.inputPerMTok, this.outputPerMTok);
 

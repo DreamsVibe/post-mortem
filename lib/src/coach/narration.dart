@@ -3,7 +3,9 @@ import 'dart:math' as math;
 
 import 'package:dartchess/dartchess.dart';
 
+import '../engine/eval.dart';
 import '../engine/game_analysis.dart';
+import '../engine/position_facts.dart';
 import '../game_record.dart';
 import '../lichess_client.dart';
 import '../settings.dart';
@@ -15,23 +17,34 @@ import 'usage.dart';
 /// The Professor's personality and rules, shared by the narration and the chat.
 const kProfessorPersona = '''
 You are "the Professor", a patient, thorough chess coach inside Post Mortem, an app for reviewing
-Lichess games. You explain the *why* behind moves rather than just labelling them, and you cover
-every layer of the game where it matters:
-- Move by move: what a move does, what it allows, how it compares with the engine's choice.
-- Tactics: forks, pins, skewers, discovered attacks, deflections, overloaded pieces, missed or
-  allowed combinations.
+Lichess games. You explain chess the way a strong human coach does: by pointing at the board.
+Talk about pieces, squares, files, pawn structure, king safety, threats and plans, and what each
+side is trying to do. You cover every layer of the game where it matters:
+- Tactics: forks, pins, skewers, discovered attacks, deflections, overloaded or loose pieces,
+  missed or allowed combinations.
 - Strategy: plans, piece coordination, initiative, which side of the board to play on.
 - Positional theory: pawn structure, weak squares and outposts, open files, good vs bad bishops,
-  space, king safety.
+  space, king safety, development.
 - Opening theory: the opening and variation, where the game left known theory, the ideas behind it.
 - Endgame theory: technique (opposition, Lucena, Philidor, rook activity, passed pawns), with
   tablebase verdicts when 7 or fewer pieces remain.
 
-Ground every claim in the data you are given (Stockfish evaluations and lines, Lichess opening
-explorer statistics, tablebase results). Never invent moves, evaluations or statistics. Use
-standard algebraic notation exactly as it appears in the data. Pitch explanations to the players'
-ratings: simpler, concrete ideas for lower-rated players, deeper positional ideas for stronger ones.
-Evaluations are in pawns from White's point of view (+ is good for White).''';
+HOW TO USE THE DATA
+- You are given verified BOARD FACTS computed from the actual position (material, loose pieces,
+  pins, forks, king safety, pawn structure, open files, outposts, what each move changed) and
+  engine lines with what they concretely achieve. Build your explanations from these facts. They
+  are correct; do not contradict them, and do not invent board details that aren't supported.
+- Stockfish evaluations are only for YOU to judge which moves matter and which side is better.
+  Never use the evaluation as the explanation. Do not write numbers like "+0.4" or "-1.2", and
+  never say "the engine says", "the evaluation", "the eval", "the number", "Stockfish prefers"
+  or "according to the engine". Say what happens on the board instead: which piece becomes weak,
+  what the threat is, what line wins material, why the plan works.
+- When a better move existed, name it and explain in chess terms why it was better, using the
+  facts about its line (for example "Nd2 keeps the e4 pawn defended and stops ...Qb6").
+- Use standard algebraic notation exactly as it appears in the data. Never invent moves or
+  statistics.
+- Pitch explanations to the players' ratings: simpler, concrete ideas for lower-rated players,
+  deeper positional ideas for stronger ones.''';
 
 /// Where a review is in its lifecycle, for the progress UI.
 enum ReviewStage { preparing, openings, endgames, writing, checking, done }
@@ -157,7 +170,12 @@ class CoachService {
       );
     }
 
-    final responses = await Future.wait([for (var c = 0; c < chunks.length; c++) requestPart(c)]);
+    // Start each later part a few seconds after the first, so it can read the game data from the
+    // prompt cache instead of paying full price for it again.
+    final responses = await Future.wait([
+      for (var c = 0; c < chunks.length; c++)
+        Future<void>.delayed(Duration(seconds: c == 0 ? 0 : 6)).then((_) => requestPart(c)),
+    ]);
     for (var c = 0; c < chunks.length; c++) {
       final (from, to) = chunks[c];
       final first = c == 0;
@@ -371,23 +389,63 @@ String buildGameData(
                 'Write to them ("you") about their moves and describe the opponent\'s moves in '
                 'the third person.',
     )
-    ..writeln('Engine: Stockfish 16 at depth ${analysis.depthSetting.depth} on the phone.')
     ..writeln()
-    ..writeln('MOVES (eval before -> after, White\'s view; best = engine choice in the position before the move)');
-  for (var ply = 1; ply <= game.plyCount; ply++) {
-    final before = analysis.evalAt(ply - 1);
-    final after = analysis.evalAt(ply);
-    final quality = analysis.qualityOf(ply);
-    final best = analysis.bestSanAt(ply - 1);
-    final line = analysis.bestLineSan(ply - 1, max: 4).join(' ');
-    final reply = analysis.bestLineSan(ply, max: 3).join(' ');
-    final mover = game.positions[ply - 1].turn == Side.white ? 'White' : 'Black';
-    b.writeln(
-      'ply $ply | ${game.moveLabel(ply)} ($mover) | ${before?.label ?? '?'} -> ${after?.label ?? '?'}'
-      ' | ${quality?.label ?? '?'} (win-chance loss ${analysis.lossOf(ply).toStringAsFixed(2)})'
-      ' | best: ${best ?? '-'}${line.isNotEmpty ? ' [$line]' : ''}'
-      ' | engine reply line: ${reply.isEmpty ? '-' : reply}',
+    ..writeln(
+      'MOVES. Each line: ply | move | how good it was | what the move changed on the board | the '
+      'better move and what its line achieves (only when the move was not best). "[rank: x->y]" '
+      'is the engine score before and after (White\'s view), for your ranking only; never quote it.',
     );
+
+  final castled = <Side>{};
+  final keyPlies = _keyPlies(game, analysis);
+  for (var ply = 1; ply <= game.plyCount; ply++) {
+    final before = game.positions[ply - 1];
+    final after = game.positions[ply];
+    final move = game.moves[ply - 1];
+    final quality = analysis.qualityOf(ply);
+    final mover = before.turn == Side.white ? 'White' : 'Black';
+    final changed = PositionFacts.move(before, move, after);
+    final bestSan = analysis.bestSanAt(ply - 1);
+    final wasBest = quality == MoveQuality.best || bestSan == null;
+    final bestLine = wasBest || analysis.evals.length <= ply - 1
+        ? ''
+        : PositionFacts.line(before, analysis.evals[ply - 1].pv);
+    final e0 = analysis.evalAt(ply - 1)?.label ?? '?';
+    final e1 = analysis.evalAt(ply)?.label ?? '?';
+    b.writeln(
+      'ply $ply | ${game.moveLabel(ply)} ($mover) | ${quality?.label ?? '?'} [rank: $e0->$e1]'
+      ' | $changed${bestLine.isNotEmpty ? ' | better: $bestSan ($bestLine)' : ''}',
+    );
+    if (game.sans[ply - 1].startsWith('O-O')) castled.add(before.turn);
+  }
+
+  // Deep dives: the full picture around the moves that matter most.
+  b
+    ..writeln()
+    ..writeln(
+      'KEY POSITIONS (full board facts before the move, and what the opponent\'s best reply '
+      'does after it)',
+    );
+  final castledBy = <int, Set<Side>>{};
+  final running = <Side>{};
+  for (var ply = 1; ply <= game.plyCount; ply++) {
+    castledBy[ply] = Set.of(running);
+    if (game.sans[ply - 1].startsWith('O-O')) running.add(game.positions[ply - 1].turn);
+  }
+  for (final ply in keyPlies) {
+    final before = game.positions[ply - 1];
+    final after = game.positions[ply];
+    final reply = analysis.evals.length > ply
+        ? PositionFacts.line(after, analysis.evals[ply].pv)
+        : '';
+    b
+      ..writeln()
+      ..writeln('== Before ${game.moveLabel(ply)} (ply $ply), ${before.turn == Side.white ? 'White' : 'Black'} to move ==')
+      ..writeln(PositionFacts.diagram(before))
+      ..writeln(
+        PositionFacts.position(before, castled: castledBy[ply] ?? const {}, opening: ply <= 24),
+      );
+    if (reply.isNotEmpty) b.writeln('- After ${game.sans[ply - 1]}, the best reply line: $reply');
   }
   if (openings != null) {
     b
@@ -401,7 +459,29 @@ String buildGameData(
       ..writeln('ENDGAME TABLEBASE (Lichess)')
       ..writeln(endgames);
   }
+  b
+    ..writeln()
+    ..writeln('FINAL POSITION')
+    ..writeln(PositionFacts.diagram(game.positions.last))
+    ..writeln(PositionFacts.position(game.positions.last, castled: castled, opening: false));
   return b.toString();
+}
+
+/// The plies that deserve a deep dive: mistakes, the biggest swings, and a few checkpoints.
+List<int> _keyPlies(GameRecord game, GameAnalysis analysis) {
+  final n = game.plyCount;
+  final scored = <(int, double)>[
+    for (var p = 1; p <= n; p++) (p, analysis.lossOf(p)),
+  ]..sort((a, b) => b.$2.compareTo(a.$2));
+  final chosen = <int>{
+    for (final (p, loss) in scored.take(10))
+      if (loss >= 0.08) p,
+  };
+  // Checkpoints so quiet games still get position-level context.
+  for (var p = 12; p <= n; p += 16) {
+    chosen.add(p);
+  }
+  return (chosen.toList()..sort()).take(16).toList();
 }
 
 /// Checks one comment against the game. Returns the cleaned comment and, if it can't be used, why.
@@ -471,28 +551,32 @@ Iterable<String> _pieceMoveTokens(String text) sync* {
 const _reviewInstructions = '''
 TASK: write a review of the game below for the app's review screen, by calling submit_review.
 
-- "moves": one entry per ply you are asked about. "comment" is 2-3 sentences (roughly 250-450
-  characters) with concrete detail: what the move does (which piece, which squares or files, what
-  it attacks or defends), the idea or plan behind it, and what it allows the opponent. For
-  inaccuracies, mistakes and blunders, name the better move from the engine data, show the key
-  follow-up from its line, and explain in plain words why it was better. Book moves in the opening
-  can be a little shorter, but still say what the move is for.
-- "label": best, good, inaccuracy, mistake, blunder or brilliant. Follow the engine quality given
-  for the ply unless you have a clear, data-backed reason (use "brilliant" only for a best move
-  that is a sound sacrifice).
+- "moves": one entry per ply you are asked about. Spend your words where they matter:
+  - Mistakes, blunders, inaccuracies, key moments and critical decisions get a full note of 3-4
+    sentences: what the move did on the board, what it overlooked or allowed (use the board facts
+    and the best reply line), what the better move was and concretely why it was better, and the
+    lesson in it.
+  - Other moves get 1-2 clear sentences about the idea: which piece, which squares or files, what
+    it prepares, attacks or defends. Book moves can be brief but still say what they are for.
+  - Never justify a move by its evaluation. Explain it with the position.
+- "label": best, good, inaccuracy, mistake, blunder or brilliant. Follow the quality given for the
+  ply unless you have a clear, data-backed reason (use "brilliant" only for a best move that is a
+  sound sacrifice).
 - "phase": opening, middlegame or endgame. "themes": up to 3 short tags like "tactics: fork" or
   "positional: weak d5 square".
-- "arrows": up to 2 per move, only when they make the comment clearer: the better move (green),
-  the threat or the problem (red), a plan or idea (blue). Squares in lowercase, e.g. g1 -> f3.
-  "highlights": up to 2 key squares or pieces.
-- "summary": 2-4 sentences telling the story of the game, shown before move 1.
+- "arrows": up to 2 per move, only when they make the note clearer: the better move (green), the
+  threat or the problem (red), a plan or idea (blue). Squares in lowercase, e.g. g1 -> f3.
+  "highlights": up to 2 key squares or pieces the note talks about.
+- "summary": 3-5 sentences telling the story of the game in chess terms: how the opening went,
+  where the balance shifted and why (on the board), and how it ended.
 - "opening": the opening and variation, the ply where the game left master theory (from the
-  explorer data, or null if unknown), and 1-3 sentences on the ideas behind it.
-- "key_moments": 3-6 ply numbers of the real turning points (big eval swings, the decisive error).
-- "recap": how the game was won, lost or drawn, then 2-4 practical lessons, each tagged with an
-  area: tactics, strategy, positional, opening or endgame.
+  explorer data, or null if unknown), and 2-3 sentences on the typical plans and pawn structure.
+- "key_moments": 3-6 ply numbers of the real turning points.
+- "recap": how the game was won, lost or drawn, in chess terms, then 2-4 practical lessons, each
+  tagged with an area: tactics, strategy, positional, opening or endgame. Lessons should be
+  habits the player can apply next game, tied to what happened in this one.
 
-Only mention moves that appear in the game or in the engine lines given for that ply.''';
+Only mention moves that appear in the game or in the lines given for that ply.''';
 
 const _submitReviewTool = {
   'name': 'submit_review',
