@@ -66,7 +66,7 @@ packages:
     source: hosted
     version: "1.19.1"
   crypto:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: crypto
       sha256: c8ea0233063ba03258fbcf2ca4d6dadfefe14f02fab57702265467a19f27fadf
@@ -280,6 +280,42 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.18.3"
+  multistockfish:
+    dependency: "direct main"
+    description:
+      path: "pkgs/multistockfish"
+      ref: "50bcf579f19ff22c07e98fdb0f787617957d7e21"
+      resolved-ref: "50bcf579f19ff22c07e98fdb0f787617957d7e21"
+      url: "https://github.com/lichess-org/dart-multistockfish.git"
+    source: git
+    version: "0.6.0"
+  multistockfish_chess:
+    dependency: "direct overridden"
+    description:
+      path: "pkgs/multistockfish_chess"
+      ref: "50bcf579f19ff22c07e98fdb0f787617957d7e21"
+      resolved-ref: "50bcf579f19ff22c07e98fdb0f787617957d7e21"
+      url: "https://github.com/lichess-org/dart-multistockfish.git"
+    source: git
+    version: "0.5.1"
+  multistockfish_sf16:
+    dependency: "direct overridden"
+    description:
+      path: "pkgs/multistockfish_sf16"
+      ref: "50bcf579f19ff22c07e98fdb0f787617957d7e21"
+      resolved-ref: "50bcf579f19ff22c07e98fdb0f787617957d7e21"
+      url: "https://github.com/lichess-org/dart-multistockfish.git"
+    source: git
+    version: "0.3.1"
+  multistockfish_variant:
+    dependency: "direct overridden"
+    description:
+      path: "pkgs/multistockfish_variant"
+      ref: "50bcf579f19ff22c07e98fdb0f787617957d7e21"
+      resolved-ref: "50bcf579f19ff22c07e98fdb0f787617957d7e21"
+      url: "https://github.com/lichess-org/dart-multistockfish.git"
+    source: git
+    version: "0.3.1"
   objective_c:
     dependency: transitive
     description:
@@ -305,7 +341,7 @@ packages:
     source: hosted
     version: "1.9.1"
   path_provider:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: path_provider
       sha256: a7f4874f987173da295a61c181b8ee71dab59b332a486b391babf26a1b884825
