@@ -32,8 +32,17 @@ class LichessClient {
     return json['username'] as String? ?? username.trim();
   }
 
-  /// The most recent finished standard games of [username], newest first.
-  Future<List<GameRecord>> userGames(String username, {int max = 30}) async {
+  /// Finished standard games of [username], newest first.
+  ///
+  /// Pass [until] (exclusive) to fetch the page of games played before it.
+  /// Lichess streams exports at roughly 20 games per second, so pages stay modest.
+  /// [fetched] is the number of games Lichess returned, including variants that were
+  /// filtered out, so callers can tell whether older games remain.
+  Future<({List<GameRecord> games, int fetched})> userGames(
+    String username, {
+    int max = 50,
+    DateTime? until,
+  }) async {
     final uri = Uri.https(_host, '/api/games/user/${username.trim()}', {
       'max': '$max',
       'moves': 'true',
@@ -42,19 +51,22 @@ class LichessClient {
       'pgnInJson': 'false',
       'clocks': 'false',
       'evals': 'false',
+      if (until != null) 'until': '${until.millisecondsSinceEpoch - 1}',
     });
-    final res = await _get(uri, accept: 'application/x-ndjson');
+    final res = await _get(uri, accept: 'application/x-ndjson', timeout: 60);
     if (res.statusCode == 404) {
       throw const LichessException('No Lichess player with that username.');
     }
     _check(res);
     final games = <GameRecord>[];
+    var fetched = 0;
     for (final line in const LineSplitter().convert(utf8.decode(res.bodyBytes))) {
       if (line.trim().isEmpty) continue;
+      fetched++;
       final record = GameRecord.fromLichessJson(jsonDecode(line) as Map<String, dynamic>);
       if (record != null && record.plyCount > 0) games.add(record);
     }
-    return games;
+    return (games: games, fetched: fetched);
   }
 
   /// One game by its 8-character Lichess ID.
@@ -78,11 +90,11 @@ class LichessClient {
     return record;
   }
 
-  Future<http.Response> _get(Uri uri, {required String accept}) async {
+  Future<http.Response> _get(Uri uri, {required String accept, int timeout = 20}) async {
     try {
       return await _http
           .get(uri, headers: {'Accept': accept, 'User-Agent': _userAgent})
-          .timeout(const Duration(seconds: 20));
+          .timeout(Duration(seconds: timeout));
     } catch (_) {
       throw const LichessException("Couldn't reach Lichess. Check your connection and try again.");
     }
