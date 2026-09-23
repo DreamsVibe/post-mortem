@@ -21,6 +21,20 @@ class GamePlayer {
   final bool isAi;
 
   String get display => rating == null ? name : '$name ($rating)';
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'rating': rating,
+    'ratingDiff': ratingDiff,
+    'ai': isAi,
+  };
+
+  static GamePlayer fromJson(Map<String, dynamic> j) => GamePlayer(
+    name: j['name'] as String? ?? '?',
+    rating: (j['rating'] as num?)?.toInt(),
+    ratingDiff: (j['ratingDiff'] as num?)?.toInt(),
+    isAi: j['ai'] as bool? ?? false,
+  );
 }
 
 /// A complete game, parsed and replayed so every position is ready to show.
@@ -58,6 +72,45 @@ class GameRecord {
   final List<Position> positions;
 
   int get plyCount => moves.length;
+
+  /// Serializes the game so it can be rebuilt later (for example by the analysis queue after the
+  /// app restarts).
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'white': white.toJson(),
+    'black': black.toJson(),
+    'result': result.name,
+    'speed': speed,
+    'status': status,
+    'opening': openingName,
+    'playedAt': playedAt?.millisecondsSinceEpoch,
+    'startFen': positions.first.fen,
+    'sans': sans,
+  };
+
+  static GameRecord? fromJson(Map<String, dynamic> j) {
+    try {
+      final Position start = Chess.fromSetup(Setup.parseFen(j['startFen'] as String));
+      final at = (j['playedAt'] as num?)?.toInt();
+      return _replay(
+        id: j['id'] as String?,
+        white: GamePlayer.fromJson((j['white'] as Map).cast()),
+        black: GamePlayer.fromJson((j['black'] as Map).cast()),
+        result: GameResult.values.firstWhere(
+          (r) => r.name == j['result'],
+          orElse: () => GameResult.unknown,
+        ),
+        speed: j['speed'] as String?,
+        status: j['status'] as String?,
+        openingName: j['opening'] as String?,
+        playedAt: at == null ? null : DateTime.fromMillisecondsSinceEpoch(at),
+        start: start,
+        sans: [for (final s in (j['sans'] as List)) s as String],
+      );
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Builds a record from a Lichess game JSON object (API export format).
   /// Returns null for variants Post Mortem does not handle yet.

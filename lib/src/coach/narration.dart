@@ -52,7 +52,7 @@ class CoachService {
   final AppSettings settings;
   final UsageTracker usage;
 
-  static const _chunkPlies = 120;
+  static const _chunkPlies = 60;
 
   Future<CoachReview?> cached(GameRecord game) async {
     final j = await store.read('coach', gameKey(game));
@@ -120,35 +120,49 @@ class CoachService {
       chunks.add((start, math.min(n, start + size - 1)));
     }
 
-    for (var c = 0; c < chunks.length; c++) {
+    // The parts are independent (every part sees the whole game), so they run side by side.
+    Future<ClaudeResponse> requestPart(int c) {
       final (from, to) = chunks[c];
       final first = c == 0;
       final last = c == chunks.length - 1;
+      final single = chunks.length == 1;
       final ask = StringBuffer()
         ..writeln('Write the review for plies $from to $to of this game by calling submit_review.')
         ..writeln('Give every ply from $from to $to exactly one entry in "moves".');
+      if (!single) {
+        ask.writeln(
+          'The review is written in ${chunks.length} parts at the same time; this is part '
+          '${c + 1}. Other parts cover the other plies.',
+        );
+      }
       if (first) {
         ask.writeln('Include "summary", "opening" and "key_moments" (for the whole game).');
       } else {
-        ask
-          ..writeln('This continues an earlier part of the review. Its summary was:')
-          ..writeln(summary)
-          ..writeln('Leave "summary" and "opening" empty. Add any key moments inside your range.');
+        ask.writeln('Leave "summary" and "opening" empty. Add any key moments inside your range.');
       }
       if (last) {
         ask.writeln('Include "recap" with 2-4 lessons, covering the whole game.');
       } else {
-        ask.writeln('Leave "recap" empty; a later part covers the end of the game.');
+        ask.writeln('Leave "recap" empty; another part covers the end of the game.');
       }
-      final res = await claude.send(
+      return claude.send(
         system: system,
         messages: [
           {'role': 'user', 'content': ask.toString()},
         ],
         tools: [_submitReviewTool],
         toolChoice: {'type': 'tool', 'name': 'submit_review'},
-        maxTokens: 16000,
+        maxTokens: 20000,
+        timeout: const Duration(minutes: 9),
       );
+    }
+
+    final responses = await Future.wait([for (var c = 0; c < chunks.length; c++) requestPart(c)]);
+    for (var c = 0; c < chunks.length; c++) {
+      final (from, to) = chunks[c];
+      final first = c == 0;
+      final last = c == chunks.length - 1;
+      final res = responses[c];
       total += res.usage;
       final input = res.toolUses.firstOrNull?['input'];
       if (input is! Map) {
@@ -214,7 +228,8 @@ class CoachService {
           ],
           tools: [_submitReviewTool],
           toolChoice: {'type': 'tool', 'name': 'submit_review'},
-          maxTokens: 12000,
+          maxTokens: 16000,
+          timeout: const Duration(minutes: 9),
         );
         total += res.usage;
         final input = res.toolUses.firstOrNull?['input'];
@@ -456,9 +471,12 @@ Iterable<String> _pieceMoveTokens(String text) sync* {
 const _reviewInstructions = '''
 TASK: write a review of the game below for the app's review screen, by calling submit_review.
 
-- "moves": one entry per ply you are asked about. "comment" is 1-2 sentences (max ~300 characters)
-  saying what the move does and why it matters; for inaccuracies, mistakes and blunders, name the
-  better move from the engine data and why it was better. Keep quiet book moves short.
+- "moves": one entry per ply you are asked about. "comment" is 2-3 sentences (roughly 250-450
+  characters) with concrete detail: what the move does (which piece, which squares or files, what
+  it attacks or defends), the idea or plan behind it, and what it allows the opponent. For
+  inaccuracies, mistakes and blunders, name the better move from the engine data, show the key
+  follow-up from its line, and explain in plain words why it was better. Book moves in the opening
+  can be a little shorter, but still say what the move is for.
 - "label": best, good, inaccuracy, mistake, blunder or brilliant. Follow the engine quality given
   for the ply unless you have a clear, data-backed reason (use "brilliant" only for a best move
   that is a sound sacrifice).

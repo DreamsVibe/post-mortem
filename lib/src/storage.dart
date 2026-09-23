@@ -54,6 +54,18 @@ class LocalStore {
     }
   }
 
+  /// Keys of every cached file of [kind].
+  Future<Set<String>> keys(String kind) async {
+    final dir = Directory('${_root.path}/$kind');
+    if (!await dir.exists()) return {};
+    final out = <String>{};
+    await for (final e in dir.list()) {
+      final name = e.uri.pathSegments.last;
+      if (name.endsWith('.json')) out.add(name.substring(0, name.length - 5));
+    }
+    return out;
+  }
+
   /// Number of cached files of [kind].
   Future<int> count(String kind) async {
     final dir = Directory('${_root.path}/$kind');

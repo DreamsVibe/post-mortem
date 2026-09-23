@@ -145,6 +145,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     if (ok != true) return;
     await services.store.clear(['coach', 'chat']);
+    await services.queue.forgetReviews();
     await _countData();
     _toast('Coach reviews and chats cleared.');
   }

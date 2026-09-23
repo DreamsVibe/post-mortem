@@ -47,3 +47,8 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // Notifications and service helpers for the background analysis service.
+    implementation("androidx.core:core-ktx:1.13.1")
+}

@@ -2,15 +2,16 @@ import 'dart:async';
 
 import 'package:chessground/chessground.dart';
 import 'package:dartchess/dartchess.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../coach/analysis_queue.dart';
 import '../coach/chat.dart';
 import '../coach/claude_client.dart';
 import '../coach/coach_models.dart';
-import '../coach/narration.dart';
 import '../coach/pgn_export.dart';
-import '../coach/usage.dart';
 import '../engine/eval.dart';
 import '../engine/game_analysis.dart';
 import '../engine/stockfish_engine.dart';
@@ -18,57 +19,15 @@ import '../game_record.dart';
 import '../lichess_client.dart';
 import '../services.dart';
 import '../theme.dart';
-import '../widgets/eval_bar.dart';
 import '../widgets/eval_graph.dart';
-import '../widgets/move_strip.dart';
+import 'queue_screen.dart';
+import 'review_widgets.dart';
 import 'settings_screen.dart';
 
-const kInaccuracy = Color(0xFFE6C45A);
-const kMistake = Color(0xFFE8934A);
-const kBlunder = Color(0xFFE0605A);
+export 'review_widgets.dart' show qualityColor, kInaccuracy, kMistake, kBlunder;
 
-Color? qualityColor(MoveQuality? q) => switch (q) {
-  MoveQuality.inaccuracy => kInaccuracy,
-  MoveQuality.mistake => kMistake,
-  MoveQuality.blunder => kBlunder,
-  _ => null,
-};
-
-/// A move played on the board away from the game's own moves.
-class VariationMove {
-  const VariationMove(this.move, this.san, this.after);
-
-  final Move move;
-  final String san;
-  final Position after;
-}
-
-/// How a Guess the move attempt went.
-class GuessResult {
-  const GuessResult({
-    required this.ply,
-    required this.guessSan,
-    required this.playedSan,
-    required this.bestSan,
-    required this.verdict,
-    required this.guessEval,
-    required this.bestEval,
-    required this.good,
-  });
-
-  /// The ply of the game move that was being guessed (1-based).
-  final int ply;
-  final String guessSan;
-  final String playedSan;
-  final String? bestSan;
-  final String verdict;
-  final Eval? guessEval;
-  final Eval? bestEval;
-  final bool good;
-}
-
-/// The review screen: board, Stockfish analysis, the Professor's commentary, Guess the move and
-/// the coach chat.
+/// The review screen: players on top, eval strip, board and graph, and a pull-up sheet with the
+/// Professor's notes and the coach chat.
 class ReviewScreen extends StatefulWidget {
   const ReviewScreen({super.key, required this.game});
 
@@ -84,9 +43,9 @@ class _ReviewScreenState extends State<ReviewScreen> {
   int _ply = 0;
   late Side _orientation = game.sideOf(services.settings.username) ?? Side.white;
 
-  // Engine analysis.
+  // Engine analysis, shared with the queue through the hub.
+  late final ValueListenable<GameAnalysis?> _analysisSource = services.hub.hold(game);
   GameAnalysis? _analysis;
-  StreamSubscription<GameAnalysis>? _analysisSub;
   String? _engineError;
 
   // Exploration away from the game's moves.
@@ -97,8 +56,6 @@ class _ReviewScreenState extends State<ReviewScreen> {
 
   // Coach review.
   CoachReview? _review;
-  ReviewStage? _coachStage;
-  String? _coachError;
   bool _showArrows = true;
 
   // Guess the move.
@@ -107,14 +64,18 @@ class _ReviewScreenState extends State<ReviewScreen> {
   bool _grading = false;
   GuessResult? _guess;
 
-  // Chat.
+  // Sheet and chat.
+  final _sheet = DraggableScrollableController();
+  ScrollController? _sheetScroll;
+  double _sheetSize = 0;
+  double _minSheet = 0.3;
+  bool _chatTab = false;
   ChatSession? _chat;
-  bool _chatOpen = false;
   bool _chatBusy = false;
   String? _chatStatus;
   String? _chatError;
   final _chatInput = TextEditingController();
-  final _chatScroll = ScrollController();
+  final _chatFocus = FocusNode();
 
   late final ChessboardController _board = ChessboardController(game: _gameData());
 
@@ -123,44 +84,70 @@ class _ReviewScreenState extends State<ReviewScreen> {
   @override
   void initState() {
     super.initState();
-    _startAnalysis();
+    _analysis = _analysisSource.value;
+    _analysisSource.addListener(_onAnalysis);
+    services.queue.addListener(_onQueue);
+    _sheet.addListener(_onSheet);
+    _chatFocus.addListener(() {
+      if (_chatFocus.hasFocus) _expandSheet();
+    });
     _loadCoach();
   }
 
   @override
   void dispose() {
-    _analysisSub?.cancel();
+    _analysisSource.removeListener(_onAnalysis);
+    services.hub.release(game);
+    services.queue.removeListener(_onQueue);
+    _sheet.removeListener(_onSheet);
+    _sheet.dispose();
     _board.dispose();
     _chatInput.dispose();
-    _chatScroll.dispose();
+    _chatFocus.dispose();
     super.dispose();
   }
 
-  Future<void> _startAnalysis() async {
-    final cached = await services.analyzer.cached(game);
+  void _onAnalysis() {
     if (!mounted) return;
-    if (cached != null) {
-      setState(() => _analysis = cached);
-      return;
+    setState(() {
+      _analysis = _analysisSource.value;
+      _engineError = services.hub.errorOf(game);
+    });
+  }
+
+  void _onQueue() {
+    if (!mounted) return;
+    final item = services.queue.itemFor(game);
+    if (item?.state == QueueState.done && _review == null) {
+      _loadCoach();
+    } else {
+      setState(() {});
     }
-    _analysisSub = services.analyzer
-        .analyze(game, services.settings.depth)
-        .listen(
-          (a) => setState(() => _analysis = a),
-          onError: (Object e) => setState(
-            () => _engineError = e is EngineException ? e.message : 'Stockfish ran into a problem.',
-          ),
-        );
+  }
+
+  void _onSheet() {
+    if (!_sheet.isAttached) return;
+    final s = _sheet.size;
+    if ((s - _sheetSize).abs() <= 0.002) return;
+    // The sheet can report its size during layout; never rebuild in the middle of a frame.
+    if (SchedulerBinding.instance.schedulerPhase == SchedulerPhase.persistentCallbacks) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() => _sheetSize = s);
+      });
+    } else {
+      setState(() => _sheetSize = s);
+    }
   }
 
   Future<void> _loadCoach() async {
     final review = await services.coach.cached(game);
-    final chat = await ChatSession.load(game, services.store);
+    final chat = _chat ?? await ChatSession.load(game, services.store);
     if (!mounted) return;
     setState(() {
       _review = review;
       _chat = chat;
     });
+    if (review != null) services.queue.markReviewed(game);
   }
 
   // ---- Displayed position ----
@@ -188,6 +175,13 @@ class _ReviewScreenState extends State<ReviewScreen> {
 
   void _syncBoard() => _board.updatePosition(_gameData());
 
+  void _resetNotesScroll() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final c = _sheetScroll;
+      if (!_chatTab && c != null && c.hasClients) c.jumpTo(0);
+    });
+  }
+
   void _go(int ply, {bool keepGuess = false}) {
     setState(() {
       _variation.clear();
@@ -198,6 +192,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
       _ply = ply.clamp(0, game.plyCount);
     });
     _syncBoard();
+    _resetNotesScroll();
   }
 
   void _back() {
@@ -220,8 +215,9 @@ class _ReviewScreenState extends State<ReviewScreen> {
       setState(() {
         _awaitingGuess = true;
         _guess = null;
-        _chatOpen = false;
+        _chatTab = false;
       });
+      _resetNotesScroll();
       return;
     }
     _go(_ply + 1);
@@ -260,7 +256,6 @@ class _ReviewScreenState extends State<ReviewScreen> {
     final mover = game.positions[ply].turn;
     final sign = mover == Side.white ? 1 : -1;
     setState(() => _grading = true);
-    // Show the guess on the board while grading.
     _board.updatePosition(
       GameData(
         fen: after.fen,
@@ -350,8 +345,6 @@ class _ReviewScreenState extends State<ReviewScreen> {
     _go(ply + 1, keepGuess: true);
   }
 
-  void _skipGuess() => _go(_ply + 1);
-
   Future<void> _refreshLiveEval() async {
     final token = ++_liveToken;
     setState(() => _liveEval = null);
@@ -390,58 +383,35 @@ class _ReviewScreenState extends State<ReviewScreen> {
 
   // ---- Coach ----
 
-  Future<void> _runCoach({bool redo = false}) async {
-    final analysis = _analysis;
-    if (analysis == null || !analysis.isComplete) return;
-    if (redo) {
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Redo the review?'),
-          content: const Text(
-            'The Professor will write a fresh review of this game. It costs about as much as the first one.',
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Redo')),
-          ],
+  Future<void> _queueReview() async {
+    final blocked = services.coach.blockedReason;
+    if (blocked != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(blocked)));
+      return;
+    }
+    await services.queue.add(game);
+  }
+
+  Future<void> _redoReview() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Redo the review?'),
+        content: const Text(
+          'The Professor will write a fresh review of this game in the queue. It costs about as '
+          'much as the first one.',
         ),
-      );
-      if (ok != true) return;
-    }
-    setState(() {
-      _coachError = null;
-      _coachStage = ReviewStage.preparing;
-    });
-    try {
-      final review = await services.coach.review(
-        game,
-        analysis,
-        onStage: (s) {
-          if (mounted) setState(() => _coachStage = s);
-        },
-      );
-      if (!mounted) return;
-      setState(() {
-        _review = review;
-        _coachStage = null;
-      });
-      _go(0);
-    } on ClaudeException catch (e) {
-      if (mounted) {
-        setState(() {
-          _coachError = e.message;
-          _coachStage = null;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _coachError = 'Something went wrong writing the review: $e';
-          _coachStage = null;
-        });
-      }
-    }
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Redo')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await services.coach.deleteReview(game);
+    services.queue.reviewed.remove(gameKey(game));
+    setState(() => _review = null);
+    await _queueReview();
   }
 
   void _jumpKeyMoment(bool next) {
@@ -471,7 +441,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
     final messenger = ScaffoldMessenger.of(context);
     if (review == null) {
       messenger.showSnackBar(
-        const SnackBar(content: Text('Run Analyze with Coach first, then export the review.')),
+        const SnackBar(content: Text('Analyze with Coach first, then export the review.')),
       );
       return;
     }
@@ -497,9 +467,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
         ),
       );
       if (go == true && mounted) {
-        await Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => const SettingsScreen()),
-        );
+        await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SettingsScreen()));
       }
       return;
     }
@@ -540,11 +508,17 @@ class _ReviewScreenState extends State<ReviewScreen> {
     );
     if (picked == null || !mounted) return;
     final side = _userSide;
+    final date = game.playedAt?.toLocal().toString().substring(0, 10);
     final name = side == null
         ? '${game.white.name} vs ${game.black.name}'
-        : 'vs ${game.opponentOf(side).name}${game.playedAt != null ? ' ${game.playedAt!.toLocal().toString().substring(0, 10)}' : ''}';
+        : 'vs ${game.opponentOf(side).name}${date != null ? ' $date' : ''}';
     try {
-      final url = await services.lichess.importToStudy(picked.$1, annotatedPgn(game, review), name, token);
+      final url = await services.lichess.importToStudy(
+        picked.$1,
+        annotatedPgn(game, review),
+        name,
+        token,
+      );
       await settings.setLastStudy(picked.$1, picked.$2);
       messenger.showSnackBar(
         SnackBar(
@@ -560,7 +534,18 @@ class _ReviewScreenState extends State<ReviewScreen> {
     }
   }
 
-  // ---- Chat ----
+  // ---- Sheet and chat ----
+
+  void _expandSheet() {
+    if (_sheet.isAttached) {
+      _sheet.animateTo(0.9, duration: const Duration(milliseconds: 220), curve: Curves.easeOut);
+    }
+  }
+
+  void _selectTab(bool chat) {
+    setState(() => _chatTab = chat);
+    if (chat) _scrollChatToEnd();
+  }
 
   BoardContext get _boardContext => BoardContext(
     ply: _exploring ? (_branchPly ?? _ply) : _ply,
@@ -575,10 +560,8 @@ class _ReviewScreenState extends State<ReviewScreen> {
     final q = _chatInput.text.trim();
     final session = _chat;
     if (q.isEmpty || session == null || _chatBusy) return;
-    FocusScope.of(context).unfocus();
     _chatInput.clear();
     setState(() {
-      _chatOpen = true;
       _chatBusy = true;
       _chatError = null;
       _chatStatus = 'Thinking…';
@@ -616,9 +599,10 @@ class _ReviewScreenState extends State<ReviewScreen> {
 
   void _scrollChatToEnd() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_chatScroll.hasClients) {
-        _chatScroll.animateTo(
-          _chatScroll.position.maxScrollExtent,
+      final c = _sheetScroll;
+      if (_chatTab && c != null && c.hasClients) {
+        c.animateTo(
+          c.position.maxScrollExtent,
           duration: const Duration(milliseconds: 250),
           curve: Curves.easeOut,
         );
@@ -631,9 +615,37 @@ class _ReviewScreenState extends State<ReviewScreen> {
     if (mounted) setState(() {});
   }
 
+  void _showMoveList(Map<int, Color> colors, Set<int> keyMoments) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: kInk,
+      isScrollControlled: true,
+      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.7),
+      builder: (context) => MoveListSheet(
+        game: game,
+        currentPly: _ply,
+        colors: colors,
+        keyMoments: keyMoments,
+        onSelect: (p) {
+          Navigator.pop(context);
+          _go(p);
+        },
+      ),
+    );
+  }
+
   // ---- UI ----
 
   Eval? get _shownEval => _exploring ? _liveEval?.eval : _analysis?.evalAt(_ply);
+
+  (String, Color?) get _stripLabel {
+    if (_awaitingGuess) return ('Your move…', kAmber);
+    if (_exploring) return ('Side line', kAmber);
+    if (_ply == 0) return ('Start', null);
+    final q = _analysis?.qualityOf(_ply);
+    if (q == null) return (game.moveLabel(_ply), null);
+    return ('${game.moveLabel(_ply)} · ${q.label}', qualityColor(q) ?? (q == MoveQuality.best ? kWin : null));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -653,1034 +665,309 @@ class _ReviewScreenState extends State<ReviewScreen> {
       }
     }
     final keyMoments = {...?review?.keyMoments};
+    final (label, labelColor) = _stripLabel;
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          '${game.white.name} vs ${game.black.name}',
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
+        titleSpacing: 0,
+        toolbarHeight: 60,
+        title: PlayersHeader(left: top, right: bottom),
         actions: [
-          if (review != null)
-            IconButton(
-              tooltip: _showArrows ? 'Hide coach arrows' : 'Show coach arrows',
-              icon: Icon(_showArrows ? Icons.visibility_outlined : Icons.visibility_off_outlined),
-              onPressed: () => setState(() => _showArrows = !_showArrows),
-            ),
-          IconButton(
-            tooltip: 'Flip board',
-            icon: const Icon(Icons.swap_vert),
-            onPressed: () => setState(() => _orientation = _orientation.opposite),
-          ),
           PopupMenuButton<String>(
             onSelected: (v) {
               switch (v) {
+                case 'flip':
+                  setState(() => _orientation = _orientation.opposite);
+                case 'arrows':
+                  setState(() => _showArrows = !_showArrows);
                 case 'export':
                   _export();
                 case 'redo':
-                  _runCoach(redo: true);
+                  _redoReview();
                 case 'clearchat':
                   _clearChat();
               }
             },
             itemBuilder: (context) => [
+              const PopupMenuItem(value: 'flip', child: Text('Flip board')),
+              if (review != null)
+                PopupMenuItem(
+                  value: 'arrows',
+                  child: Text(_showArrows ? 'Hide coach arrows' : 'Show coach arrows'),
+                ),
               const PopupMenuItem(value: 'export', child: Text('Export to Lichess study')),
-              if (review != null && analysis?.isComplete == true && _coachStage == null)
+              if (review != null && !(services.queue.itemFor(game)?.pending ?? false))
                 const PopupMenuItem(value: 'redo', child: Text('Redo coach review')),
-              if ((_chat?.messages.isNotEmpty ?? false))
+              if (_chat?.messages.isNotEmpty ?? false)
                 const PopupMenuItem(value: 'clearchat', child: Text('Clear chat')),
             ],
           ),
         ],
       ),
       body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            const barWidth = 16.0;
-            const gap = 6.0;
-            final maxByWidth = constraints.maxWidth - barWidth - gap - 8;
-            final keyboard = MediaQuery.of(context).viewInsets.bottom > 0;
-            final maxByHeight = constraints.maxHeight * (keyboard ? 0.38 : (_chatOpen ? 0.42 : 0.56));
-            final boardSize = maxByWidth < maxByHeight ? maxByWidth : maxByHeight;
-            return Column(
-              children: [
-                if (!keyboard)
-                  _Toolbar(
-                  guessOn: _guessOn,
-                  onGuessChanged: (v) => setState(() {
-                    _guessOn = v;
-                    if (!v) _awaitingGuess = false;
-                    _guess = null;
-                  }),
-                  hasKeyMoments: keyMoments.isNotEmpty,
-                  onPrevKey: () => _jumpKeyMoment(false),
-                  onNextKey: () => _jumpKeyMoment(true),
-                ),
-                _PlayerLine(player: top),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    EvalBar(
-                      eval: _awaitingGuess ? null : _shownEval,
-                      orientation: _orientation,
-                      height: boardSize,
-                    ),
-                    const SizedBox(width: gap),
-                    Chessboard(
-                      size: boardSize,
-                      controller: _board,
-                      orientation: _orientation,
-                      onMove: _grading ? null : _onBoardMove,
-                      shapes: _shapes,
-                      settings: const ChessboardSettings(
-                        enablePremoves: false,
-                        animationDuration: Duration(milliseconds: 180),
-                      ),
-                    ),
-                  ],
-                ),
-                _PlayerLine(player: bottom),
-                if (!keyboard)
-                  MoveStrip(
-                    game: game,
-                    currentPly: _exploring ? (_branchPly ?? _ply) : _ply,
-                    onSelectPly: _go,
-                    colors: _awaitingGuess ? const {} : colors,
-                    keyMoments: keyMoments,
-                  ),
-                Expanded(
-                  child: _chatOpen
-                      ? _ChatHistory(
-                          messages: _chat?.messages ?? const [],
-                          busy: _chatBusy,
-                          status: _chatStatus,
-                          error: _chatError,
-                          controller: _chatScroll,
-                        )
-                      : ListView(
-                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+        top: false,
+        child: Column(
+          children: [
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final h = constraints.maxHeight;
+                  final w = constraints.maxWidth;
+                  const pad = 12.0;
+                  const stripH = 30.0;
+                  const graphH = 44.0;
+                  const gaps = 6.0 * 3;
+                  final fullBoard = w - pad * 2;
+                  // The sheet rests just under the graph; never smaller than a few lines of text.
+                  final restPx = (h - (stripH + fullBoard + graphH + gaps)).clamp(170.0, h * 0.6);
+                  final minSize = (restPx / h).clamp(0.2, 0.6);
+                  _minSheet = minSize;
+                  final size = _sheetSize == 0 ? minSize : _sheetSize.clamp(minSize, 0.9);
+                  // As the sheet rises, the board shrinks to stay visible above it.
+                  final topSpace = h * (1 - size);
+                  final showGraph = topSpace - stripH - gaps - 140 > graphH + 60;
+                  final boardSize = (topSpace - stripH - gaps - (showGraph ? graphH : 0))
+                      .clamp(120.0, fullBoard);
+                  return Stack(
+                    children: [
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        top: 0,
+                        child: Column(
                           children: [
-                            if (_awaitingGuess)
-                              _GuessPrompt(
-                                label: game.moveLabel(_ply + 1).split(' ').first,
-                                side: game.positions[_ply].turn,
-                                grading: _grading,
-                                onSkip: _skipGuess,
-                              )
-                            else ...[
-                              if (_guess != null && _guess!.ply == _ply) _GuessCard(result: _guess!),
-                              _MoveInfo(
-                                game: game,
-                                ply: _ply,
-                                analysis: analysis,
-                                variation: _variation,
-                                branchPly: _branchPly,
-                                liveEval: _liveEval,
-                                onBackToGame: () => _go(_branchPly ?? _ply),
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(pad, 6, pad, 6),
+                              child: EvalStrip(
+                                eval: _awaitingGuess ? null : _shownEval,
+                                label: label,
+                                labelColor: labelColor,
+                                orientation: _orientation,
                               ),
-                              const SizedBox(height: 12),
-                              if (!_exploring)
-                                _CoachPanel(
-                                  game: game,
-                                  ply: _ply,
-                                  review: review,
-                                  analysisComplete: analysis?.isComplete ?? false,
-                                  stage: _coachStage,
-                                  error: _coachError,
-                                  blockedReason: services.coach.blockedReason,
-                                  onAnalyze: () => _runCoach(),
-                                  onOpenSettings: () async {
-                                    await Navigator.of(context).push(
-                                      MaterialPageRoute(builder: (_) => const SettingsScreen()),
-                                    );
-                                    if (mounted) setState(() {});
-                                  },
+                            ),
+                            Chessboard(
+                              size: boardSize,
+                              controller: _board,
+                              orientation: _orientation,
+                              onMove: _grading ? null : _onBoardMove,
+                              shapes: _shapes,
+                              settings: ChessboardSettings(
+                                enablePremoves: false,
+                                borderRadius: BorderRadius.circular(6),
+                                animationDuration: const Duration(milliseconds: 180),
+                              ),
+                            ),
+                            if (showGraph && !_awaitingGuess)
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(pad, 6, pad, 0),
+                                child: SizedBox(
+                                  height: graphH,
+                                  child: EvalGraph(
+                                    evals: [
+                                      for (final e in analysis?.evals ?? const <PositionEval>[])
+                                        e.eval,
+                                    ],
+                                    plyCount: game.plyCount,
+                                    currentPly: _ply,
+                                    onSelectPly: _go,
+                                    markers: markers,
+                                    keyMoments: keyMoments,
+                                  ),
                                 ),
-                            ],
-                            const SizedBox(height: 12),
-                            if (_engineError != null)
-                              Text(_engineError!, style: const TextStyle(color: kLoss))
-                            else if (analysis == null || !analysis.isComplete)
-                              _AnalysisProgress(
-                                done: analysis?.evals.length ?? 0,
-                                total: game.positions.length,
-                              ),
-                            const SizedBox(height: 8),
-                            if (!_awaitingGuess)
-                              EvalGraph(
-                                evals: [
-                                  for (final e in analysis?.evals ?? const <PositionEval>[]) e.eval,
-                                ],
-                                plyCount: game.plyCount,
-                                currentPly: _ply,
-                                onSelectPly: _go,
-                                markers: markers,
-                                keyMoments: keyMoments,
                               ),
                           ],
                         ),
-                ),
-                if (!keyboard)
-                  _NavBar(
-                  canBack: !_grading && (_exploring || _ply > 0),
-                  canForward: !_grading && !_awaitingGuess && !_exploring && _ply < game.plyCount,
-                  onStart: () => _go(0),
-                  onBack: _back,
-                  onForward: _forward,
-                  onEnd: () => _go(game.plyCount),
-                ),
-                _ChatBar(
-                  controller: _chatInput,
-                  open: _chatOpen,
-                  busy: _chatBusy,
-                  enabled: services.settings.hasApiKey,
-                  count: _chat?.messages.length ?? 0,
-                  onToggle: () => setState(() => _chatOpen = !_chatOpen),
-                  onSend: _sendChat,
-                  onFocus: () {
-                    if (!_chatOpen) setState(() => _chatOpen = true);
-                  },
-                ),
-              ],
-            );
-          },
-        ),
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------------------------
-
-class _Toolbar extends StatelessWidget {
-  const _Toolbar({
-    required this.guessOn,
-    required this.onGuessChanged,
-    required this.hasKeyMoments,
-    required this.onPrevKey,
-    required this.onNextKey,
-  });
-
-  final bool guessOn;
-  final ValueChanged<bool> onGuessChanged;
-  final bool hasKeyMoments;
-  final VoidCallback onPrevKey;
-  final VoidCallback onNextKey;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      child: Row(
-        children: [
-          const Icon(Icons.psychology_alt_outlined, size: 20, color: kAmber),
-          const SizedBox(width: 6),
-          const Text('Guess the move', style: TextStyle(color: kIvory, fontSize: 14)),
-          const SizedBox(width: 4),
-          Switch(value: guessOn, onChanged: onGuessChanged),
-          const Spacer(),
-          if (hasKeyMoments) ...[
-            IconButton(
-              tooltip: 'Previous key moment',
-              icon: const Icon(Icons.keyboard_double_arrow_left, color: kAmber),
-              onPressed: onPrevKey,
-            ),
-            const Icon(Icons.star, size: 16, color: kAmber),
-            IconButton(
-              tooltip: 'Next key moment',
-              icon: const Icon(Icons.keyboard_double_arrow_right, color: kAmber),
-              onPressed: onNextKey,
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _GuessPrompt extends StatelessWidget {
-  const _GuessPrompt({
-    required this.label,
-    required this.side,
-    required this.grading,
-    required this.onSkip,
-  });
-
-  final String label;
-  final Side side;
-  final bool grading;
-  final VoidCallback onSkip;
-
-  @override
-  Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
-    return _Card(
-      accent: kAmber,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            grading ? 'Grading your move…' : 'Your move, ${side == Side.white ? 'White' : 'Black'}',
-            style: text.titleMedium?.copyWith(color: kIvory, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            grading
-                ? 'Stockfish is checking it against the best move.'
-                : 'What would you play at move $label? Make your move on the board.',
-            style: text.bodyMedium?.copyWith(color: kIvoryMuted),
-          ),
-          if (grading)
-            const Padding(
-              padding: EdgeInsets.only(top: 10),
-              child: LinearProgressIndicator(minHeight: 3),
-            )
-          else
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton(onPressed: onSkip, child: const Text('Skip this one')),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _GuessCard extends StatelessWidget {
-  const _GuessCard({required this.result});
-
-  final GuessResult result;
-
-  @override
-  Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
-    final color = result.good ? kWin : kMistake;
-    final same = result.guessSan.replaceAll(RegExp(r'[+#]'), '') ==
-        result.playedSan.replaceAll(RegExp(r'[+#]'), '');
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: _Card(
-        accent: color,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(result.good ? Icons.check_circle : Icons.error_outline, color: color, size: 20),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'You played ${result.guessSan}${result.guessEval != null ? ' (${result.guessEval!.label})' : ''}',
-                    style: text.titleSmall?.copyWith(color: kIvory, fontWeight: FontWeight.w600),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(result.verdict, style: text.bodyMedium?.copyWith(color: color)),
-            const SizedBox(height: 4),
-            Text(
-              [
-                if (result.bestSan != null)
-                  'Best: ${result.bestSan}${result.bestEval != null ? ' (${result.bestEval!.label})' : ''}',
-                same ? 'Same as the game move.' : 'Game move: ${result.playedSan}',
-              ].join('  ·  '),
-              style: text.bodySmall?.copyWith(color: kIvoryMuted),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _MoveInfo extends StatelessWidget {
-  const _MoveInfo({
-    required this.game,
-    required this.ply,
-    required this.analysis,
-    required this.variation,
-    required this.branchPly,
-    required this.liveEval,
-    required this.onBackToGame,
-  });
-
-  final GameRecord game;
-  final int ply;
-  final GameAnalysis? analysis;
-  final List<VariationMove> variation;
-  final int? branchPly;
-  final PositionEval? liveEval;
-  final VoidCallback onBackToGame;
-
-  @override
-  Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
-    if (variation.isNotEmpty) {
-      final start = game.positions[branchPly ?? ply];
-      final line = variation.map((v) => v.san).join(' ');
-      final best = liveEval == null
-          ? null
-          : uciLineToSan(variation.last.after, liveEval!.pv.take(4).toList()).join(' ');
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.alt_route, size: 18, color: kAmber),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  'Exploring from ${game.moveLabel(branchPly ?? ply)}',
-                  style: text.titleSmall?.copyWith(color: kAmber),
-                ),
-              ),
-              TextButton(onPressed: onBackToGame, child: const Text('Back to game')),
-            ],
-          ),
-          Text(
-            '${start.turn == Side.white ? '' : '… '}$line',
-            style: text.titleMedium?.copyWith(color: kIvory),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            liveEval == null
-                ? 'Stockfish is thinking…'
-                : 'Eval ${liveEval!.eval.label}${best != null && best.isNotEmpty ? '  ·  Best line: $best' : ''}',
-            style: text.bodyMedium?.copyWith(color: kIvoryMuted),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'Ask the Professor about this line in the chat below.',
-            style: text.bodySmall?.copyWith(color: kIvoryMuted),
-          ),
-        ],
-      );
-    }
-
-    final quality = analysis?.qualityOf(ply);
-    final eval = analysis?.evalAt(ply);
-    final bestBefore = ply > 0 ? analysis?.bestSanAt(ply - 1) : null;
-    final showBest = quality != null &&
-        quality != MoveQuality.best &&
-        quality != MoveQuality.good &&
-        bestBefore != null;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(game.moveLabel(ply), style: text.titleLarge?.copyWith(color: kIvory)),
-            ),
-            if (quality != null && ply > 0) _QualityChip(quality: quality),
-            if (eval != null) ...[
-              const SizedBox(width: 8),
-              Text(eval.label, style: text.titleMedium?.copyWith(color: kIvoryMuted)),
-            ],
-          ],
-        ),
-        if (showBest)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-              'Best was $bestBefore',
-              style: text.bodyMedium?.copyWith(color: kIvoryMuted),
-            ),
-          ),
-        if (ply == game.plyCount)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-              'Result: ${game.result.label}${game.status != null ? ' (${game.status})' : ''}',
-              style: text.bodyMedium?.copyWith(color: kIvoryMuted),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-class _CoachPanel extends StatelessWidget {
-  const _CoachPanel({
-    required this.game,
-    required this.ply,
-    required this.review,
-    required this.analysisComplete,
-    required this.stage,
-    required this.error,
-    required this.blockedReason,
-    required this.onAnalyze,
-    required this.onOpenSettings,
-  });
-
-  final GameRecord game;
-  final int ply;
-  final CoachReview? review;
-  final bool analysisComplete;
-  final ReviewStage? stage;
-  final String? error;
-  final String? blockedReason;
-  final VoidCallback onAnalyze;
-  final VoidCallback onOpenSettings;
-
-  @override
-  Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
-    final r = review;
-
-    if (stage != null) {
-      final label = switch (stage!) {
-        ReviewStage.preparing => 'Getting the game ready…',
-        ReviewStage.openings => 'Checking the opening against master games…',
-        ReviewStage.endgames => 'Checking the endgame tablebase…',
-        ReviewStage.writing => 'The Professor is writing the review. This takes about a minute…',
-        ReviewStage.checking => 'Checking every comment against the game…',
-        ReviewStage.done => 'Done.',
-      };
-      return _Card(
-        accent: kAmber,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(label, style: text.bodyMedium?.copyWith(color: kIvory)),
-            const SizedBox(height: 10),
-            const LinearProgressIndicator(minHeight: 3),
-          ],
-        ),
-      );
-    }
-
-    if (r == null) {
-      final blocked = blockedReason;
-      final waiting = !analysisComplete;
-      return _Card(
-        accent: kAmber,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'Ask the Professor to review this game: a story of the game, a comment and arrows '
-              'for every move, key moments, and lessons at the end.',
-              style: text.bodyMedium?.copyWith(color: kIvoryMuted),
-            ),
-            if (error != null) ...[
-              const SizedBox(height: 8),
-              Text(error!, style: text.bodyMedium?.copyWith(color: kLoss)),
-            ],
-            if (blocked != null) ...[
-              const SizedBox(height: 8),
-              Text(blocked, style: text.bodySmall?.copyWith(color: kIvoryMuted)),
-            ],
-            const SizedBox(height: 12),
-            FilledButton.icon(
-              onPressed: blocked != null
-                  ? (services.settings.hasApiKey ? null : onOpenSettings)
-                  : (waiting ? null : onAnalyze),
-              style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
-              icon: Icon(blocked != null && !services.settings.hasApiKey ? Icons.key : Icons.school_outlined),
-              label: Text(
-                blocked != null && !services.settings.hasApiKey
-                    ? 'Add API key in Settings'
-                    : waiting
-                    ? 'Analyze with Coach (after Stockfish finishes)'
-                    : error != null
-                    ? 'Try again'
-                    : 'Analyze with Coach',
+                      ),
+                      DraggableScrollableSheet(
+                        controller: _sheet,
+                        initialChildSize: minSize,
+                        minChildSize: minSize,
+                        maxChildSize: 0.9,
+                        snap: true,
+                        snapSizes: [if (0.6 > minSize + 0.05) 0.6],
+                        builder: (context, scroll) {
+                          _sheetScroll = scroll;
+                          return _buildSheet(scroll, h, analysis, review, keyMoments);
+                        },
+                      ),
+                    ],
+                  );
+                },
               ),
             ),
+            ReviewControls(
+              guessOn: _guessOn,
+              onToggleGuess: () => setState(() {
+                _guessOn = !_guessOn;
+                if (!_guessOn) _awaitingGuess = false;
+                _guess = null;
+                if (_guessOn) _chatTab = false;
+              }),
+              hasKeyMoments: keyMoments.isNotEmpty,
+              onPrevKey: () => _jumpKeyMoment(false),
+              onNextKey: () => _jumpKeyMoment(true),
+              onMoveList: () => _showMoveList(colors, keyMoments),
+              canBack: !_grading && (_exploring || _ply > 0),
+              canForward: !_grading && !_awaitingGuess && !_exploring && _ply < game.plyCount,
+              onBack: _back,
+              onForward: _forward,
+              onStart: () => _go(0),
+              onEnd: () => _go(game.plyCount),
+            ),
           ],
         ),
-      );
-    }
+      ),
+    );
+  }
 
-    final children = <Widget>[];
-    if (ply == 0) {
-      children.add(
-        _Card(
-          accent: kAmber,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _CardTitle(icon: Icons.menu_book_outlined, title: 'The story of the game'),
-              const SizedBox(height: 6),
-              Text(r.summary, style: text.bodyMedium?.copyWith(color: kIvory, height: 1.4)),
-              if (r.openingName != null || r.openingIdeas != null) ...[
-                const SizedBox(height: 12),
-                Text(
-                  r.openingName ?? 'The opening',
-                  style: text.titleSmall?.copyWith(color: kAmber),
-                ),
-                if (r.leftTheoryAtPly != null && r.leftTheoryAtPly! <= game.plyCount)
-                  Text(
-                    'Left master theory at ${game.moveLabel(r.leftTheoryAtPly!)}',
-                    style: text.bodySmall?.copyWith(color: kIvoryMuted),
-                  ),
-                if (r.openingIdeas != null) ...[
-                  const SizedBox(height: 4),
-                  Text(r.openingIdeas!, style: text.bodyMedium?.copyWith(color: kIvory, height: 1.4)),
-                ],
-              ],
-              const SizedBox(height: 8),
-              Text(
-                'Step through the moves to see the Professor\'s notes.',
-                style: text.bodySmall?.copyWith(color: kIvoryMuted),
-              ),
-            ],
+  Widget _buildSheet(
+    ScrollController scroll,
+    double h,
+    GameAnalysis? analysis,
+    CoachReview? review,
+    Set<int> keyMoments,
+  ) {
+    final header = SheetHeader(
+      chatTab: _chatTab,
+      onTab: _selectTab,
+      chatCount: (_chat?.messages.length ?? 0) ~/ 2,
+      onDrag: (dy) {
+        if (!_sheet.isAttached) return;
+        _sheet.jumpTo((_sheet.size - dy / h).clamp(_minSheet, 0.9));
+      },
+      onDragEnd: () {},
+    );
+
+    final Widget content;
+    if (_chatTab) {
+      content = Column(
+        children: [
+          Expanded(
+            child: ChatHistory(
+              messages: _chat?.messages ?? const [],
+              busy: _chatBusy,
+              status: _chatStatus,
+              error: _chatError,
+              controller: scroll,
+            ),
           ),
-        ),
+          ChatInput(
+            controller: _chatInput,
+            focusNode: _chatFocus,
+            busy: _chatBusy,
+            enabled: services.settings.hasApiKey,
+            onSend: _sendChat,
+          ),
+        ],
       );
     } else {
-      final c = r.moves[ply];
-      children.add(
-        _Card(
-          accent: r.keyMoments.contains(ply) ? kAmber : Colors.white24,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Icon(Icons.school_outlined, size: 18, color: kAmber),
-                  const SizedBox(width: 6),
-                  Text(
-                    r.keyMoments.contains(ply) ? 'The Professor · key moment' : 'The Professor',
-                    style: text.labelLarge?.copyWith(color: kAmber),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              Text(
-                c?.comment ?? 'No note for this move.',
-                style: text.bodyMedium?.copyWith(
-                  color: c == null ? kIvoryMuted : kIvory,
-                  height: 1.4,
-                ),
-              ),
-              if (c != null && c.themes.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    for (final t in c.themes)
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.white10,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Text(t, style: const TextStyle(color: kIvoryMuted, fontSize: 12)),
-                      ),
-                  ],
-                ),
-              ],
-            ],
+      content = GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onHorizontalDragEnd: (d) {
+          final v = d.primaryVelocity ?? 0;
+          if (v < -250 && !_awaitingGuess) _forward();
+          if (v > 250) _back();
+        },
+        child: ListView(
+          key: ValueKey('notes-$_ply-${_exploring ? 'x' : ''}'),
+          controller: scroll,
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+          children: _notesChildren(analysis, review, keyMoments),
+        ),
+      );
+    }
+
+    return Material(
+      color: kInkRaised,
+      elevation: 8,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(children: [header, Expanded(child: content)]),
+    );
+  }
+
+  List<Widget> _notesChildren(GameAnalysis? analysis, CoachReview? review, Set<int> keyMoments) {
+    final out = <Widget>[];
+    if (_awaitingGuess) {
+      out.add(
+        GuessPrompt(
+          label: game.moveLabel(_ply + 1).split(' ').first,
+          side: game.positions[_ply].turn,
+          grading: _grading,
+          onSkip: () => _go(_ply + 1),
+        ),
+      );
+      return out;
+    }
+    if (_guess != null && _guess!.ply == _ply) {
+      out
+        ..add(GuessCard(result: _guess!))
+        ..add(const SizedBox(height: 12));
+    }
+    if (_exploring) {
+      out.add(
+        ExplorationInfo(
+          game: game,
+          branchPly: _branchPly ?? _ply,
+          variation: _variation,
+          liveEval: _liveEval,
+          onBackToGame: () => _go(_branchPly ?? _ply),
+        ),
+      );
+      return out;
+    }
+
+    out
+      ..add(
+        MoveHeadline(
+          game: game,
+          ply: _ply,
+          analysis: analysis,
+          isKeyMoment: keyMoments.contains(_ply),
+        ),
+      )
+      ..add(const SizedBox(height: 12));
+
+    if (review != null) {
+      out.add(CoachNotes(game: game, ply: _ply, review: review));
+    } else {
+      out.add(
+        CoachStatus(
+          item: services.queue.itemFor(game),
+          analysisComplete: analysis?.isComplete ?? false,
+          blockedReason: services.coach.blockedReason,
+          hasApiKey: services.settings.hasApiKey,
+          onAnalyze: _queueReview,
+          onRetry: () {
+            final item = services.queue.itemFor(game);
+            if (item != null) services.queue.retry(item);
+          },
+          onOpenSettings: () async {
+            await Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+            );
+            if (mounted) setState(() {});
+          },
+          onOpenQueue: () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const QueueScreen()),
           ),
         ),
       );
     }
-    if (ply == game.plyCount && (r.recapText.isNotEmpty || r.lessons.isNotEmpty)) {
-      children
+
+    if (_engineError != null) {
+      out
         ..add(const SizedBox(height: 12))
+        ..add(Text(_engineError!, style: const TextStyle(color: kLoss)));
+    } else if (analysis == null || !analysis.isComplete) {
+      out
+        ..add(const SizedBox(height: 14))
         ..add(
-          _Card(
-            accent: kWin,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _CardTitle(icon: Icons.flag_outlined, title: 'Recap'),
-                const SizedBox(height: 6),
-                Text(r.recapText, style: text.bodyMedium?.copyWith(color: kIvory, height: 1.4)),
-                if (r.lessons.isNotEmpty) ...[
-                  const SizedBox(height: 10),
-                  Text('Lessons', style: text.titleSmall?.copyWith(color: kAmber)),
-                  const SizedBox(height: 4),
-                  for (final l in r.lessons)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Container(
-                            margin: const EdgeInsets.only(top: 2, right: 8),
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                            decoration: BoxDecoration(
-                              color: kAmber.withValues(alpha: 0.15),
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Text(
-                              l.area,
-                              style: const TextStyle(color: kAmber, fontSize: 11),
-                            ),
-                          ),
-                          Expanded(
-                            child: Text(
-                              l.lesson,
-                              style: text.bodyMedium?.copyWith(color: kIvory, height: 1.35),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                ],
-                const SizedBox(height: 8),
-                Text(
-                  'Reviewed by ${r.model} · ${formatDollars(r.cost)}',
-                  style: text.bodySmall?.copyWith(color: kIvoryMuted),
-                ),
-              ],
-            ),
-          ),
+          AnalysisProgress(done: analysis?.evals.length ?? 0, total: game.positions.length),
         );
     }
-    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children);
-  }
-}
-
-class _CardTitle extends StatelessWidget {
-  const _CardTitle({required this.icon, required this.title});
-
-  final IconData icon;
-  final String title;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, size: 18, color: kAmber),
-        const SizedBox(width: 6),
-        Text(
-          title,
-          style: Theme.of(context).textTheme.titleSmall?.copyWith(
-            color: kIvory,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _Card extends StatelessWidget {
-  const _Card({required this.child, required this.accent});
-
-  final Widget child;
-  final Color accent;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: kInkRaised,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: accent.withValues(alpha: 0.45)),
-      ),
-      child: child,
-    );
-  }
-}
-
-class _QualityChip extends StatelessWidget {
-  const _QualityChip({required this.quality});
-
-  final MoveQuality quality;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = qualityColor(quality) ?? (quality == MoveQuality.best ? kWin : kIvoryMuted);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: color.withValues(alpha: 0.6)),
-      ),
-      child: Text(
-        quality.label,
-        style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600),
-      ),
-    );
-  }
-}
-
-class _AnalysisProgress extends StatelessWidget {
-  const _AnalysisProgress({required this.done, required this.total});
-
-  final int done;
-  final int total;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Stockfish is analyzing the game… $done / $total positions',
-          style: const TextStyle(color: kIvoryMuted, fontSize: 13),
-        ),
-        const SizedBox(height: 6),
-        LinearProgressIndicator(
-          value: total == 0 ? null : done / total,
-          minHeight: 4,
-          borderRadius: BorderRadius.circular(2),
-        ),
-      ],
-    );
-  }
-}
-
-class _NavBar extends StatelessWidget {
-  const _NavBar({
-    required this.canBack,
-    required this.canForward,
-    required this.onStart,
-    required this.onBack,
-    required this.onForward,
-    required this.onEnd,
-  });
-
-  final bool canBack;
-  final bool canForward;
-  final VoidCallback onStart;
-  final VoidCallback onBack;
-  final VoidCallback onForward;
-  final VoidCallback onEnd;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          IconButton(
-            tooltip: 'Start',
-            iconSize: 28,
-            icon: const Icon(Icons.first_page),
-            onPressed: canBack ? onStart : null,
-          ),
-          IconButton(
-            tooltip: 'Previous move',
-            iconSize: 36,
-            icon: const Icon(Icons.chevron_left),
-            onPressed: canBack ? onBack : null,
-          ),
-          IconButton(
-            tooltip: 'Next move',
-            iconSize: 36,
-            icon: const Icon(Icons.chevron_right),
-            onPressed: canForward ? onForward : null,
-          ),
-          IconButton(
-            tooltip: 'End',
-            iconSize: 28,
-            icon: const Icon(Icons.last_page),
-            onPressed: canForward ? onEnd : null,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ChatBar extends StatelessWidget {
-  const _ChatBar({
-    required this.controller,
-    required this.open,
-    required this.busy,
-    required this.enabled,
-    required this.count,
-    required this.onToggle,
-    required this.onSend,
-    required this.onFocus,
-  });
-
-  final TextEditingController controller;
-  final bool open;
-  final bool busy;
-  final bool enabled;
-  final int count;
-  final VoidCallback onToggle;
-  final VoidCallback onSend;
-  final VoidCallback onFocus;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
-      decoration: const BoxDecoration(
-        color: kInkRaised,
-        border: Border(top: BorderSide(color: Colors.white10)),
-      ),
-      child: Row(
-        children: [
-          IconButton(
-            tooltip: open ? 'Hide chat' : 'Show chat',
-            onPressed: onToggle,
-            icon: Badge(
-              isLabelVisible: !open && count > 0,
-              label: Text('${count ~/ 2}'),
-              child: Icon(open ? Icons.expand_more : Icons.forum_outlined, color: kAmber),
-            ),
-          ),
-          Expanded(
-            child: TextField(
-              controller: controller,
-              enabled: enabled && !busy,
-              minLines: 1,
-              maxLines: 3,
-              textInputAction: TextInputAction.send,
-              onTap: onFocus,
-              onSubmitted: (_) => onSend(),
-              decoration: InputDecoration(
-                isDense: true,
-                hintText: enabled ? 'Ask the Professor about this position…' : 'Add an API key in Settings to chat',
-                fillColor: kInk,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              ),
-            ),
-          ),
-          const SizedBox(width: 4),
-          IconButton(
-            tooltip: 'Send',
-            onPressed: enabled && !busy ? onSend : null,
-            icon: busy
-                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.send, color: kAmber),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ChatHistory extends StatelessWidget {
-  const _ChatHistory({
-    required this.messages,
-    required this.busy,
-    required this.status,
-    required this.error,
-    required this.controller,
-  });
-
-  final List<ChatMessage> messages;
-  final bool busy;
-  final String? status;
-  final String? error;
-  final ScrollController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    if (messages.isEmpty && !busy && error == null) {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(24),
-          child: Text(
-            'Ask anything about the position on the board: "What if I had played Nf3 here?", '
-            '"Why is this a blunder?", "What do masters play here?". The Professor checks '
-            'with Stockfish on your phone and Lichess before answering.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: kIvoryMuted, height: 1.4),
-          ),
-        ),
-      );
-    }
-    return ListView(
-      controller: controller,
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-      children: [
-        for (final m in messages) _Bubble(message: m),
-        if (busy)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: Row(
-              children: [
-                const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
-                const SizedBox(width: 10),
-                Text(status ?? 'Thinking…', style: const TextStyle(color: kIvoryMuted)),
-              ],
-            ),
-          ),
-        if (error != null)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: Text(error!, style: const TextStyle(color: kLoss)),
-          ),
-      ],
-    );
-  }
-}
-
-class _Bubble extends StatelessWidget {
-  const _Bubble({required this.message});
-
-  final ChatMessage message;
-
-  @override
-  Widget build(BuildContext context) {
-    final user = message.fromUser;
-    return Align(
-      alignment: user ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.82),
-        decoration: BoxDecoration(
-          color: user ? kAmber.withValues(alpha: 0.18) : kInkRaised,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SelectableText(
-              message.text,
-              style: const TextStyle(color: kIvory, height: 1.4, fontSize: 14.5),
-            ),
-            if (!user && message.sources.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(
-                'Sources: ${message.sources.join(' · ')}',
-                style: const TextStyle(color: kIvoryMuted, fontSize: 11.5),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _PlayerLine extends StatelessWidget {
-  const _PlayerLine({required this.player});
-
-  final GamePlayer player;
-
-  @override
-  Widget build(BuildContext context) {
-    final diff = player.ratingDiff;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      child: Row(
-        children: [
-          Icon(player.isAi ? Icons.memory : Icons.person_outline, size: 18, color: kIvoryMuted),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              player.display,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: kIvory, fontSize: 15),
-            ),
-          ),
-          if (diff != null)
-            Text(
-              diff >= 0 ? '+$diff' : '$diff',
-              style: TextStyle(color: diff >= 0 ? kWin : kLoss, fontSize: 14),
-            ),
-        ],
-      ),
-    );
+    return out;
   }
 }

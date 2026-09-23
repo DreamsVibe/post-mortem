@@ -1,7 +1,9 @@
+import 'coach/analysis_queue.dart';
 import 'coach/chat.dart';
 import 'coach/claude_client.dart';
 import 'coach/narration.dart';
 import 'coach/usage.dart';
+import 'engine/engine_hub.dart';
 import 'engine/game_analysis.dart';
 import 'lichess_client.dart';
 import 'settings.dart';
@@ -17,6 +19,8 @@ class AppServices {
     required this.usage,
     required this.coach,
     required this.chat,
+    required this.hub,
+    required this.queue,
   });
 
   final AppSettings settings;
@@ -26,6 +30,8 @@ class AppServices {
   final UsageTracker usage;
   final CoachService coach;
   final ChatService chat;
+  final EngineHub hub;
+  final AnalysisQueue queue;
 
   static Future<AppServices> create() async {
     final settings = await AppSettings.load();
@@ -33,20 +39,25 @@ class AppServices {
     final lichess = LichessClient();
     final usage = UsageTracker(settings.prefs, settings);
     final claude = ClaudeClient(settings);
+    final analyzer = GameAnalyzer(store);
+    final hub = EngineHub(analyzer, settings);
+    final coach = CoachService(
+      claude: claude,
+      lichess: lichess,
+      store: store,
+      settings: settings,
+      usage: usage,
+    );
     return AppServices(
       settings: settings,
       lichess: lichess,
       store: store,
-      analyzer: GameAnalyzer(store),
+      analyzer: analyzer,
       usage: usage,
-      coach: CoachService(
-        claude: claude,
-        lichess: lichess,
-        store: store,
-        settings: settings,
-        usage: usage,
-      ),
+      coach: coach,
       chat: ChatService(claude: claude, lichess: lichess, settings: settings, usage: usage),
+      hub: hub,
+      queue: AnalysisQueue(hub: hub, coach: coach, store: store),
     );
   }
 }

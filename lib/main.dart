@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'src/screens/games_screen.dart';
@@ -9,6 +11,8 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   services = await AppServices.create();
   runApp(const PostMortemApp());
+  // Resume any reviews that were waiting when the app was last closed.
+  unawaited(services.queue.load());
 }
 
 class PostMortemApp extends StatelessWidget {

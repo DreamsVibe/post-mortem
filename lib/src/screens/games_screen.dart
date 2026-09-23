@@ -2,10 +2,14 @@ import 'package:chessground/chessground.dart';
 import 'package:dartchess/dartchess.dart';
 import 'package:flutter/material.dart';
 
+import '../coach/analysis_queue.dart';
 import '../game_record.dart';
 import '../lichess_client.dart';
 import '../settings.dart';
 import '../theme.dart';
+import '../services.dart';
+import '../storage.dart';
+import 'queue_screen.dart';
 import 'review_screen.dart';
 import 'settings_screen.dart';
 
@@ -183,6 +187,23 @@ class _GamesScreenState extends State<GamesScreen> {
       appBar: AppBar(
         title: Text(_isOwn ? 'Your games' : "$_player's games"),
         actions: [
+          ListenableBuilder(
+            listenable: services.queue,
+            builder: (context, _) {
+              final pending = services.queue.pendingCount;
+              return IconButton(
+                tooltip: 'Analysis queue',
+                icon: Badge(
+                  isLabelVisible: pending > 0,
+                  label: Text('$pending'),
+                  child: const Icon(Icons.pending_actions_outlined),
+                ),
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const QueueScreen()),
+                ),
+              );
+            },
+          ),
           IconButton(
             tooltip: 'Look up a player',
             icon: const Icon(Icons.person_search_outlined),
@@ -203,8 +224,9 @@ class _GamesScreenState extends State<GamesScreen> {
         icon: const Icon(Icons.link),
         label: const Text('Open link or PGN'),
       ),
-      body: Builder(
-        builder: (context) {
+      body: ListenableBuilder(
+        listenable: services.queue,
+        builder: (context, _) {
           if (_loading) {
             return const Center(child: CircularProgressIndicator());
           }
@@ -470,6 +492,8 @@ class _GameTile extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 12),
+            _StatusIcon(game: game),
+            const SizedBox(width: 8),
             Text(outcome ?? game.result.label,
                 style: text.labelLarge?.copyWith(color: outcomeColor, fontWeight: FontWeight.w600)),
           ],
@@ -590,4 +614,44 @@ String clockTime(DateTime t) {
   final hour = t.hour % 12 == 0 ? 12 : t.hour % 12;
   final minute = t.minute.toString().padLeft(2, '0');
   return '$hour:$minute ${t.hour < 12 ? 'AM' : 'PM'}';
+}
+
+
+/// Shows whether a game has a coach review, is in the queue, or is being analyzed right now.
+class _StatusIcon extends StatelessWidget {
+  const _StatusIcon({required this.game});
+
+  final GameRecord game;
+
+  @override
+  Widget build(BuildContext context) {
+    final queue = services.queue;
+    final item = queue.itemFor(game);
+    if (item != null && item.active) {
+      return const SizedBox(
+        width: 18,
+        height: 18,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      );
+    }
+    if (item != null && item.state == QueueState.queued) {
+      return const Tooltip(
+        message: 'Waiting in the analysis queue',
+        child: Icon(Icons.schedule, size: 18, color: kIvoryMuted),
+      );
+    }
+    if (queue.reviewed.contains(gameKey(game))) {
+      return const Tooltip(
+        message: 'Coach review ready',
+        child: Icon(Icons.school, size: 18, color: kAmber),
+      );
+    }
+    if (item != null && item.state == QueueState.failed) {
+      return const Tooltip(
+        message: 'Review failed — see the queue',
+        child: Icon(Icons.error_outline, size: 18, color: kLoss),
+      );
+    }
+    return const SizedBox(width: 18);
+  }
 }
