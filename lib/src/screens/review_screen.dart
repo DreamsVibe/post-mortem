@@ -18,6 +18,7 @@ import '../engine/stockfish_engine.dart';
 import '../game_record.dart';
 import '../lichess_client.dart';
 import '../services.dart';
+import '../storage.dart';
 import '../theme.dart';
 import '../widgets/eval_graph.dart';
 import 'queue_screen.dart';
